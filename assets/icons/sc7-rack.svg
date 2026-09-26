@@ -1,0 +1,234 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Chassis Gradient -->
+    <linearGradient id="chassisGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#242836"/>
+      <stop offset="50%" stop-color="#191c26"/>
+      <stop offset="100%" stop-color="#12141c"/>
+    </linearGradient>
+
+    <!-- Rail Gradient -->
+    <linearGradient id="railGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3d4458"/>
+      <stop offset="50%" stop-color="#2a2f3d"/>
+      <stop offset="100%" stop-color="#1d202b"/>
+    </linearGradient>
+
+    <!-- Inner Screen Bevel Gradient -->
+    <linearGradient id="screenBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0c12"/>
+      <stop offset="100%" stop-color="#07080b"/>
+    </linearGradient>
+
+    <!-- Pane Gradient -->
+    <linearGradient id="paneBg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#181c28"/>
+      <stop offset="100%" stop-color="#11141e"/>
+    </linearGradient>
+
+    <!-- Metallic Bolt Gradient -->
+    <radialGradient id="boltGrad" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#8a94aa"/>
+      <stop offset="60%" stop-color="#414757"/>
+      <stop offset="100%" stop-color="#181a22"/>
+    </radialGradient>
+
+    <!-- LED Glow Filters -->
+    <filter id="glowGreen" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowCyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowOrange" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadowFilter" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Shadow & Chassis Frame -->
+  <rect x="24" y="24" width="464" height="464" rx="72" ry="72"
+        fill="url(#chassisGrad)" stroke="#3f475c" stroke-width="3"
+        filter="url(#shadowFilter)"/>
+
+  <!-- Top Bevel Highlight Line -->
+  <path d="M 96 26 L 416 26" stroke="#5a6582" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+
+  <!-- Left Rack Rail -->
+  <rect x="36" y="64" width="22" height="384" rx="6" fill="url(#railGrad)" stroke="#1a1c24" stroke-width="1.5"/>
+  <!-- Left Rail Bolts -->
+  <circle cx="47" cy="88" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="47" cy="88" r="2.5" fill="#15171e"/>
+  <circle cx="47" cy="184" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="47" cy="184" r="2.5" fill="#15171e"/>
+  <circle cx="47" cy="328" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="47" cy="328" r="2.5" fill="#15171e"/>
+  <circle cx="47" cy="424" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="47" cy="424" r="2.5" fill="#15171e"/>
+
+  <!-- Right Rack Rail -->
+  <rect x="454" y="64" width="22" height="384" rx="6" fill="url(#railGrad)" stroke="#1a1c24" stroke-width="1.5"/>
+  <!-- Right Rail Bolts -->
+  <circle cx="465" cy="88" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="465" cy="88" r="2.5" fill="#15171e"/>
+  <circle cx="465" cy="184" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="465" cy="184" r="2.5" fill="#15171e"/>
+  <circle cx="465" cy="328" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="465" cy="328" r="2.5" fill="#15171e"/>
+  <circle cx="465" cy="424" r="6" fill="url(#boltGrad)" stroke="#15171e" stroke-width="1"/>
+  <circle cx="465" cy="424" r="2.5" fill="#15171e"/>
+
+  <!-- Header Section -->
+  <!-- LED Status Lights -->
+  <circle cx="82" cy="54" r="4.5" fill="#2ee59d" filter="url(#glowGreen)"/>
+  <circle cx="98" cy="54" r="4.5" fill="#00d2ff" filter="url(#glowCyan)"/>
+  <circle cx="114" cy="54" r="4.5" fill="#ffaa00" filter="url(#glowOrange)"/>
+
+  <!-- Rack Title Label -->
+  <text x="256" y="59" fill="#8892b0" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="800" letter-spacing="3" text-anchor="middle">SC7 RACK</text>
+
+  <!-- Ventilation Grille Dots on Right Header -->
+  <circle cx="398" cy="54" r="2" fill="#32384a"/>
+  <circle cx="408" cy="54" r="2" fill="#32384a"/>
+  <circle cx="418" cy="54" r="2" fill="#32384a"/>
+  <circle cx="428" cy="54" r="2" fill="#32384a"/>
+
+  <!-- Inner Display Bay -->
+  <rect x="70" y="74" width="372" height="372" rx="20" ry="20"
+        fill="url(#screenBg)" stroke="#272c3b" stroke-width="2.5"/>
+
+  <!-- ================= QUAD 1: Top-Left (Terminal) ================= -->
+  <g transform="translate(80, 84)">
+    <rect width="170" height="170" rx="14" ry="14" fill="url(#paneBg)" stroke="#232736" stroke-width="1.5"/>
+    <!-- Window Header -->
+    <rect x="0" y="0" width="170" height="22" rx="14" ry="14" fill="#1c202e"/>
+    <rect x="0" y="10" width="170" height="12" fill="#1c202e"/>
+    <circle cx="14" cy="11" r="3" fill="#ff5f56"/>
+    <circle cx="24" cy="11" r="3" fill="#ffbd2e"/>
+    <circle cx="34" cy="11" r="3" fill="#27c93f"/>
+    <!-- Terminal Prompt & Code Lines -->
+    <text x="14" y="50" fill="#38c7bd" font-family="monospace" font-size="20" font-weight="900">&gt;_</text>
+    <rect x="42" y="38" width="84" height="8" rx="4" fill="#38c7bd" opacity="0.8"/>
+    <rect x="14" y="66" width="128" height="6" rx="3" fill="#4d566e"/>
+    <rect x="14" y="80" width="96" height="6" rx="3" fill="#4d566e"/>
+    <rect x="14" y="94" width="114" height="6" rx="3" fill="#4d566e"/>
+    <!-- GPU Load Mini Bar -->
+    <rect x="14" y="122" width="142" height="26" rx="6" fill="#0d1017" stroke="#252a3a" stroke-width="1"/>
+    <text x="22" y="139" fill="#00d2ff" font-family="system-ui, sans-serif" font-size="10" font-weight="700">GPU 78%</text>
+    <rect x="80" y="131" width="68" height="8" rx="4" fill="#161c28"/>
+    <rect x="80" y="131" width="53" height="8" rx="4" fill="#00d2ff"/>
+  </g>
+
+  <!-- ================= QUAD 2: Top-Right (COSMIC Files) ================= -->
+  <g transform="translate(262, 84)">
+    <rect width="170" height="170" rx="14" ry="14" fill="url(#paneBg)" stroke="#232736" stroke-width="1.5"/>
+    <!-- Window Header -->
+    <rect x="0" y="0" width="170" height="22" rx="14" ry="14" fill="#1c202e"/>
+    <rect x="0" y="10" width="170" height="12" fill="#1c202e"/>
+    <circle cx="14" cy="11" r="3" fill="#ff5f56"/>
+    <circle cx="24" cy="11" r="3" fill="#ffbd2e"/>
+    <circle cx="34" cy="11" r="3" fill="#27c93f"/>
+    <!-- Folder Icon Body -->
+    <path d="M 24 50 L 64 50 L 76 60 L 146 60 C 150 60 152 62 152 66 L 152 134 C 152 138 150 142 144 142 L 26 142 C 20 142 18 138 18 134 L 18 56 C 18 52 20 50 24 50 Z"
+          fill="#f5a623" opacity="0.9"/>
+    <!-- Front Folder Flap with Gradient -->
+    <path d="M 18 72 L 152 72 L 146 138 C 146 141 143 144 139 144 L 31 144 C 27 144 24 141 24 138 Z"
+          fill="#ffbe44"/>
+    <!-- Nested Document Card -->
+    <rect x="42" y="78" width="86" height="52" rx="6" fill="#ffffff" opacity="0.95"/>
+    <rect x="52" y="88" width="50" height="5" rx="2.5" fill="#3a70d2"/>
+    <rect x="52" y="98" width="66" height="4" rx="2" fill="#9aa3b8"/>
+    <rect x="52" y="106" width="58" height="4" rx="2" fill="#9aa3b8"/>
+    <rect x="52" y="114" width="40" height="4" rx="2" fill="#9aa3b8"/>
+  </g>
+
+  <!-- ================= QUAD 3: Bottom-Left (System Monitor) ================= -->
+  <g transform="translate(80, 266)">
+    <rect width="170" height="170" rx="14" ry="14" fill="url(#paneBg)" stroke="#232736" stroke-width="1.5"/>
+    <!-- Window Header -->
+    <rect x="0" y="0" width="170" height="22" rx="14" ry="14" fill="#1c202e"/>
+    <rect x="0" y="10" width="170" height="12" fill="#1c202e"/>
+    <circle cx="14" cy="11" r="3" fill="#ff5f56"/>
+    <circle cx="24" cy="11" r="3" fill="#ffbd2e"/>
+    <circle cx="34" cy="11" r="3" fill="#27c93f"/>
+    <!-- Grid Background Lines -->
+    <line x1="14" y1="56" x2="156" y2="56" stroke="#1f2535" stroke-width="1"/>
+    <line x1="14" y1="88" x2="156" y2="88" stroke="#1f2535" stroke-width="1"/>
+    <line x1="14" y1="120" x2="156" y2="120" stroke="#1f2535" stroke-width="1"/>
+    <line x1="50" y1="36" x2="50" y2="154" stroke="#1f2535" stroke-width="1"/>
+    <line x1="95" y1="36" x2="95" y2="154" stroke="#1f2535" stroke-width="1"/>
+    <line x1="140" y1="36" x2="140" y2="154" stroke="#1f2535" stroke-width="1"/>
+    <!-- ECG / Telemetry Heartbeat Wave -->
+    <path d="M 14 100 L 40 100 L 52 86 L 62 122 L 76 46 L 88 134 L 98 92 L 108 104 L 118 100 L 156 100"
+          fill="none" stroke="#2ee59d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#glowGreen)"/>
+    <!-- Pulse Area Glow -->
+    <path d="M 14 100 L 40 100 L 52 86 L 62 122 L 76 46 L 88 134 L 98 92 L 108 104 L 118 100 L 156 100 L 156 150 L 14 150 Z"
+          fill="#2ee59d" opacity="0.12"/>
+    <text x="18" y="44" fill="#2ee59d" font-family="system-ui, sans-serif" font-size="10" font-weight="700">CPU LOAD</text>
+  </g>
+
+  <!-- ================= QUAD 4: Bottom-Right (htop / Process Manager) ================= -->
+  <g transform="translate(262, 266)">
+    <rect width="170" height="170" rx="14" ry="14" fill="url(#paneBg)" stroke="#232736" stroke-width="1.5"/>
+    <!-- Window Header -->
+    <rect x="0" y="0" width="170" height="22" rx="14" ry="14" fill="#1c202e"/>
+    <rect x="0" y="10" width="170" height="12" fill="#1c202e"/>
+    <circle cx="14" cy="11" r="3" fill="#ff5f56"/>
+    <circle cx="24" cy="11" r="3" fill="#ffbd2e"/>
+    <circle cx="34" cy="11" r="3" fill="#27c93f"/>
+    <!-- htop Bar 1: Core 1 -->
+    <text x="14" y="45" fill="#8892b0" font-family="monospace" font-size="10" font-weight="700">1</text>
+    <rect x="28" y="37" width="128" height="9" rx="3" fill="#161a25"/>
+    <rect x="28" y="37" width="94" height="9" rx="3" fill="#2ee59d"/>
+    <rect x="28" y="37" width="46" height="9" rx="3" fill="#38c7bd"/>
+    <!-- htop Bar 2: Core 2 -->
+    <text x="14" y="63" fill="#8892b0" font-family="monospace" font-size="10" font-weight="700">2</text>
+    <rect x="28" y="55" width="128" height="9" rx="3" fill="#161a25"/>
+    <rect x="28" y="55" width="112" height="9" rx="3" fill="#2ee59d"/>
+    <rect x="28" y="55" width="78" height="9" rx="3" fill="#38c7bd"/>
+    <rect x="28" y="55" width="34" height="9" rx="3" fill="#ffaa00"/>
+    <!-- htop Bar 3: Core 3 -->
+    <text x="14" y="81" fill="#8892b0" font-family="monospace" font-size="10" font-weight="700">3</text>
+    <rect x="28" y="73" width="128" height="9" rx="3" fill="#161a25"/>
+    <rect x="28" y="73" width="70" height="9" rx="3" fill="#2ee59d"/>
+    <rect x="28" y="73" width="32" height="9" rx="3" fill="#38c7bd"/>
+    <!-- htop Bar 4: Memory -->
+    <text x="14" y="99" fill="#8892b0" font-family="monospace" font-size="10" font-weight="700">M</text>
+    <rect x="28" y="91" width="128" height="9" rx="3" fill="#161a25"/>
+    <rect x="28" y="91" width="86" height="9" rx="3" fill="#a066ea"/>
+    <!-- Task Process Rows -->
+    <rect x="14" y="114" width="142" height="10" rx="3" fill="#161a25"/>
+    <rect x="18" y="117" width="22" height="4" rx="2" fill="#00d2ff"/>
+    <rect x="46" y="117" width="48" height="4" rx="2" fill="#8892b0"/>
+    <rect x="100" y="117" width="36" height="4" rx="2" fill="#2ee59d"/>
+
+    <rect x="14" y="130" width="142" height="10" rx="3" fill="#161a25"/>
+    <rect x="18" y="133" width="22" height="4" rx="2" fill="#00d2ff"/>
+    <rect x="46" y="133" width="60" height="4" rx="2" fill="#8892b0"/>
+    <rect x="112" y="133" width="24" height="4" rx="2" fill="#2ee59d"/>
+
+    <rect x="14" y="146" width="142" height="10" rx="3" fill="#161a25"/>
+    <rect x="18" y="149" width="22" height="4" rx="2" fill="#00d2ff"/>
+    <rect x="46" y="149" width="38" height="4" rx="2" fill="#8892b0"/>
+    <rect x="90" y="149" width="30" height="4" rx="2" fill="#2ee59d"/>
+  </g>
+
+  <!-- Central Crosshair / Grid Divider Accent -->
+  <line x1="256" y1="84" x2="256" y2="436" stroke="#252a3a" stroke-width="2"/>
+  <line x1="80" y1="260" x2="432" y2="260" stroke="#252a3a" stroke-width="2"/>
+</svg>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=SC7 Rack Settings
+GenericName=SC7 Rack Settings
+Comment=Configure SC7 Rack autostart, clipboard sharing, and files path
+Exec=/home/sc7/bin/sc7-rack-settings --gui
+Icon=sc7-rack
+Terminal=false
+Categories=Settings;DesktopSettings;Utility;X-COSMIC;
+Keywords=rack;settings;configuration;clipboard;autostart;
+StartupWMClass=sc7-rack-settings

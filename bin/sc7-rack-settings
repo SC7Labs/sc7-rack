@@ -3,12 +3,14 @@ import json
 import os
 import sys
 import subprocess
+import signal
 
 CONFIG_DIR = os.path.expanduser("~/.config/sc7-rack")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "sc7-rack.desktop")
 PROJECT_ROOT = "/home/sc7/projects/opensource projects/sc7-rack"
+ICON_PATH = os.path.join(PROJECT_ROOT, "assets/icons/sc7-rack-128.png")
 
 DEFAULT_SETTINGS = {
     "autostart": False,
@@ -17,6 +19,7 @@ DEFAULT_SETTINGS = {
 }
 
 def load_settings():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     if not os.path.exists(SETTINGS_FILE):
         return dict(DEFAULT_SETTINGS)
     try:
@@ -33,29 +36,50 @@ def save_settings(settings):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=2)
     sync_autostart(settings.get("autostart", False))
+    sync_live_bridge(settings.get("share_clipboard", True))
 
 def sync_autostart(enabled):
     os.makedirs(AUTOSTART_DIR, exist_ok=True)
     if enabled:
+        exec_path = os.path.expanduser("~/bin/sc7-rack")
+        if not os.path.exists(exec_path):
+            exec_path = os.path.join(PROJECT_ROOT, "bin/sc7-rack")
         content = (
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=SC7 Rack\n"
-            "Comment=SC7 Rack nested compositor desktop\n"
-            f"Exec={os.path.expanduser('~/bin/sc7-rack')}\n"
+            "GenericName=Developer Rack Compositor\n"
+            "Comment=Nested 2x2 developer workspace with terminal, files, monitor, and htop\n"
+            f"Exec={exec_path}\n"
+            "Icon=sc7-rack\n"
             "Terminal=false\n"
-            "Categories=System;\n"
+            "Categories=COSMIC;System;Utility;Development;\n"
+            "StartupWMClass=sc7-rack\n"
         )
         with open(AUTOSTART_FILE, "w") as f:
             f.write(content)
     else:
         if os.path.exists(AUTOSTART_FILE):
-            os.remove(AUTOSTART_FILE)
+            try:
+                os.remove(AUTOSTART_FILE)
+            except OSError:
+                pass
+
+def get_rack_status():
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "[s]way.*sc7-rack/config"], text=True)
+        pids = [int(p) for p in out.strip().splitlines() if p.strip().isdigit()]
+        if pids:
+            return {"running": True, "pid": pids[0]}
+    except Exception:
+        pass
+    return {"running": False, "pid": None}
 
 def get_bridge_status():
     host_disp = os.environ.get("SC7_HOST_WAYLAND_DISPLAY", "")
     rack_disp = ""
     is_running = False
+    pid = None
 
     try:
         out = subprocess.check_output(["pgrep", "-a", "-f", "sc7-clipboard-bridge"], text=True)
@@ -63,6 +87,8 @@ def get_bridge_status():
             if "sc7-clipboard-bridge" in line:
                 is_running = True
                 parts = line.split()
+                if parts and parts[0].isdigit():
+                    pid = int(parts[0])
                 if "--host" in parts:
                     host_disp = parts[parts.index("--host") + 1]
                 if "--nested" in parts:
@@ -88,74 +114,400 @@ def get_bridge_status():
 
     return {
         "running": is_running,
+        "pid": pid,
         "host": host_disp or "wayland-1",
         "rack": rack_disp or "wayland-2"
     }
 
+def sync_live_bridge(enable):
+    rack = get_rack_status()
+    if not rack["running"]:
+        return
+
+    bridge = get_bridge_status()
+    if not enable and bridge["running"]:
+        subprocess.run(["pkill", "-f", "sc7-clipboard-bridge"], stderr=subprocess.DEVNULL)
+    elif enable and not bridge["running"]:
+        bridge_bin = os.path.join(PROJECT_ROOT, "bin/sc7-clipboard-bridge")
+        if not os.path.exists(bridge_bin):
+            bridge_bin = os.path.expanduser("~/bin/sc7-clipboard-bridge")
+        if os.path.exists(bridge_bin):
+            host = os.environ.get("SC7_HOST_WAYLAND_DISPLAY", "wayland-1")
+            nested = os.environ.get("WAYLAND_DISPLAY", "wayland-2")
+            if host == nested:
+                nested = "wayland-2" if host != "wayland-2" else "wayland-3"
+            subprocess.Popen([bridge_bin, "--host", host, "--nested", nested],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def print_status(settings):
+    rack = get_rack_status()
     bridge = get_bridge_status()
     autostart_mark = "[x]" if settings.get("autostart") else "[ ]"
     clipboard_mark = "[x]" if settings.get("share_clipboard") else "[ ]"
 
     print("========================================")
-    print("SC7 Rack Settings & Status")
+    print("           SC7 Rack Settings")
     print("========================================")
-    print(f"{autostart_mark} Start SC7 Rack at login")
-    print(f"{clipboard_mark} Share clipboard with desktop")
-    print(f"Files path: {settings.get('files_path', '/home/sc7/projects/portfolio')}")
+    print(f"Status:             {'Running (PID ' + str(rack['pid']) + ')' if rack['running'] else 'Stopped'}")
+    print(f"{autostart_mark} Start at login:     {'Enabled' if settings.get('autostart') else 'Disabled'}")
+    print(f"{clipboard_mark} Share clipboard:    {'Enabled' if settings.get('share_clipboard') else 'Disabled'}")
+    print(f"Files path:         {settings.get('files_path', DEFAULT_SETTINGS['files_path'])}")
     print("----------------------------------------")
-    print(f"Clipboard bridge: {'Connected' if bridge['running'] else 'Disconnected'}")
-    print(f"Host: COSMIC / {bridge['host']}")
-    print(f"Rack: Sway / {bridge['rack']}")
+    print(f"Clipboard Bridge:   {'Connected (PID ' + str(bridge['pid']) + ')' if bridge['running'] else 'Disconnected'}")
+    print(f"Host Wayland:       {bridge['host']}")
+    print(f"Rack Wayland:       {bridge['rack']}")
     print("========================================")
 
 def show_gui(settings):
-    if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
-        print_status(settings)
-        return
-
-    # Check if zenity is available
-    has_zenity = subprocess.run(["which", "zenity"], capture_output=True).returncode == 0
-    if not has_zenity:
-        print_status(settings)
-        return
-
-    # Simple zenity forms or list dialog
-    # Checklist for options
-    autostart_val = "TRUE" if settings.get("autostart") else "FALSE"
-    clipboard_val = "TRUE" if settings.get("share_clipboard") else "FALSE"
-
-    cmd = [
-        "zenity", "--list", "--checklist",
-        "--title=SC7 Rack Settings",
-        "--text=Configure SC7 Rack options:",
-        "--column=Enable", "--column=Setting", "--column=Description",
-        autostart_val, "autostart", "Start SC7 Rack at login",
-        clipboard_val, "share_clipboard", "Share clipboard with desktop",
-        "--width=450", "--height=220"
-    ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0:
-            selected = [x.strip() for x in res.stdout.split("|")]
-            settings["autostart"] = "autostart" in selected
-            settings["share_clipboard"] = "share_clipboard" in selected
-            save_settings(settings)
-            print("Settings updated successfully.")
-            print_status(settings)
-    except Exception as e:
-        print(f"GUI error: {e}")
+        import tkinter as tk
+        from tkinter import ttk, filedialog
+    except ImportError:
         print_status(settings)
+        return
+
+    root = tk.Tk()
+    root.title("SC7 Rack Settings")
+    root.geometry("540x510")
+    root.minsize(500, 480)
+
+    # Dark Theme Colors
+    BG_COLOR = "#181b24"
+    CARD_BG = "#202534"
+    BORDER_COLOR = "#2e3549"
+    TEXT_MAIN = "#f2f4f8"
+    TEXT_MUTED = "#9aa3b6"
+    ACCENT_TEAL = "#38c7bd"
+    ACCENT_BLUE = "#3a75e8"
+    GREEN_COLOR = "#2ee59d"
+    RED_COLOR = "#ff5f56"
+
+    root.configure(bg=BG_COLOR)
+
+    # Window Icon
+    if os.path.exists(ICON_PATH):
+        try:
+            icon_img = tk.PhotoImage(file=ICON_PATH)
+            root.iconphoto(True, icon_img)
+        except Exception:
+            pass
+
+    # Styling
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure(".", background=BG_COLOR, foreground=TEXT_MAIN, font=("sans-serif", 10))
+
+    # Main Scrollable / Padded Container
+    container = tk.Frame(root, bg=BG_COLOR, padx=24, pady=20)
+    container.pack(fill=tk.BOTH, expand=True)
+
+    # 1. Header Card
+    header_frame = tk.Frame(container, bg=CARD_BG, highlightbackground=BORDER_COLOR,
+                            highlightthickness=1, padx=16, pady=14)
+    header_frame.pack(fill=tk.X, pady=(0, 16))
+
+    header_left = tk.Frame(header_frame, bg=CARD_BG)
+    header_left.pack(side=tk.LEFT, fill=tk.Y)
+
+    title_label = tk.Label(header_left, text="SC7 Rack", font=("sans-serif", 16, "bold"),
+                           fg=TEXT_MAIN, bg=CARD_BG)
+    title_label.pack(anchor="w")
+
+    subtitle_label = tk.Label(header_left, text="Nested Compositor & Developer Workspace",
+                              font=("sans-serif", 9), fg=TEXT_MUTED, bg=CARD_BG)
+    subtitle_label.pack(anchor="w")
+
+    # Status Pill on the Right
+    rack = get_rack_status()
+    is_running = rack["running"]
+    status_text = f"● Active (PID {rack['pid']})" if is_running else "○ Stopped"
+    status_fg = GREEN_COLOR if is_running else TEXT_MUTED
+
+    status_pill = tk.Label(header_frame, text=status_text, font=("sans-serif", 9, "bold"),
+                           fg=status_fg, bg="#131620", padx=10, pady=5,
+                           highlightbackground=BORDER_COLOR, highlightthickness=1)
+    status_pill.pack(side=tk.RIGHT, anchor="center")
+
+    # 2. Options Card
+    options_frame = tk.Frame(container, bg=CARD_BG, highlightbackground=BORDER_COLOR,
+                             highlightthickness=1, padx=18, pady=16)
+    options_frame.pack(fill=tk.X, pady=(0, 16))
+
+    # Option 1: Start at login
+    autostart_var = tk.BooleanVar(value=bool(settings.get("autostart", False)))
+
+    chk_autostart = tk.Checkbutton(
+        options_frame,
+        text="Start SC7 Rack at login",
+        variable=autostart_var,
+        font=("sans-serif", 11, "bold"),
+        fg=TEXT_MAIN,
+        bg=CARD_BG,
+        activebackground=CARD_BG,
+        activeforeground=ACCENT_TEAL,
+        selectcolor="#131620",
+        relief=tk.FLAT,
+        highlightthickness=0,
+        bd=0
+    )
+    chk_autostart.pack(anchor="w")
+
+    desc_autostart = tk.Label(
+        options_frame,
+        text="Automatically launches SC7 Rack when you log into your desktop session",
+        font=("sans-serif", 9),
+        fg=TEXT_MUTED,
+        bg=CARD_BG
+    )
+    desc_autostart.pack(anchor="w", padx=(24, 0), pady=(0, 14))
+
+    # Option 2: Share clipboard with desktop
+    clipboard_var = tk.BooleanVar(value=bool(settings.get("share_clipboard", True)))
+
+    chk_clipboard = tk.Checkbutton(
+        options_frame,
+        text="Share clipboard with desktop",
+        variable=clipboard_var,
+        font=("sans-serif", 11, "bold"),
+        fg=TEXT_MAIN,
+        bg=CARD_BG,
+        activebackground=CARD_BG,
+        activeforeground=ACCENT_TEAL,
+        selectcolor="#131620",
+        relief=tk.FLAT,
+        highlightthickness=0,
+        bd=0
+    )
+    chk_clipboard.pack(anchor="w")
+
+    bridge_info = get_bridge_status()
+    bridge_state = f"Connected ({bridge_info['host']} ⇄ {bridge_info['rack']})" if bridge_info["running"] else "Idle"
+    desc_clipboard = tk.Label(
+        options_frame,
+        text=f"Seamless text and file copy/paste between host and rack (Status: {bridge_state})",
+        font=("sans-serif", 9),
+        fg=TEXT_MUTED,
+        bg=CARD_BG
+    )
+    desc_clipboard.pack(anchor="w", padx=(24, 0), pady=(0, 14))
+
+    # Divider Line
+    sep = tk.Frame(options_frame, height=1, bg=BORDER_COLOR)
+    sep.pack(fill=tk.X, pady=(2, 14))
+
+    # Option 3: Files Path
+    lbl_files = tk.Label(
+        options_frame,
+        text="Files path (COSMIC Files inside rack):",
+        font=("sans-serif", 11, "bold"),
+        fg=TEXT_MAIN,
+        bg=CARD_BG
+    )
+    lbl_files.pack(anchor="w")
+
+    desc_files = tk.Label(
+        options_frame,
+        text="Working directory opened by COSMIC Files in the top-right rack quadrant",
+        font=("sans-serif", 9),
+        fg=TEXT_MUTED,
+        bg=CARD_BG
+    )
+    desc_files.pack(anchor="w", pady=(0, 8))
+
+    path_frame = tk.Frame(options_frame, bg=CARD_BG)
+    path_frame.pack(fill=tk.X)
+
+    path_var = tk.StringVar(value=str(settings.get("files_path", DEFAULT_SETTINGS["files_path"])))
+
+    entry_path = tk.Entry(
+        path_frame,
+        textvariable=path_var,
+        font=("sans-serif", 10),
+        fg=TEXT_MAIN,
+        bg="#131620",
+        insertbackground=TEXT_MAIN,
+        relief=tk.FLAT,
+        highlightbackground=BORDER_COLOR,
+        highlightthickness=1,
+        padx=10,
+        pady=7
+    )
+    entry_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+    def on_browse():
+        current_dir = path_var.get()
+        if not os.path.isdir(current_dir):
+            current_dir = os.path.expanduser("~")
+        selected = filedialog.askdirectory(
+            parent=root,
+            initialdir=current_dir,
+            title="Select COSMIC Files Directory"
+        )
+        if selected:
+            path_var.set(selected)
+
+    btn_browse = tk.Button(
+        path_frame,
+        text="Browse...",
+        command=on_browse,
+        font=("sans-serif", 9, "bold"),
+        fg=TEXT_MAIN,
+        bg="#2d3345",
+        activebackground="#3b435b",
+        activeforeground=TEXT_MAIN,
+        relief=tk.FLAT,
+        highlightthickness=0,
+        padx=14,
+        pady=6,
+        cursor="hand2"
+    )
+    btn_browse.pack(side=tk.RIGHT)
+
+    # Toast / Message Label
+    toast_label = tk.Label(container, text="", font=("sans-serif", 9, "bold"), fg=GREEN_COLOR, bg=BG_COLOR)
+    toast_label.pack(pady=(4, 8))
+
+    def show_toast(msg, is_error=False):
+        toast_label.config(text=msg, fg=RED_COLOR if is_error else GREEN_COLOR)
+        root.after(3500, lambda: toast_label.config(text=""))
+
+    # 3. Actions / Bottom Bar
+    actions_frame = tk.Frame(container, bg=BG_COLOR)
+    actions_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+
+    # Rack control toggle button on left
+    def toggle_rack():
+        r = get_rack_status()
+        if r["running"]:
+            try:
+                os.kill(r["pid"], signal.SIGTERM)
+                show_toast("Stopping SC7 Rack...")
+                root.after(1000, refresh_status)
+            except Exception as e:
+                show_toast(f"Error stopping: {e}", is_error=True)
+        else:
+            launch_script = os.path.expanduser("~/bin/sc7-rack")
+            if not os.path.exists(launch_script):
+                launch_script = os.path.join(PROJECT_ROOT, "bin/sc7-rack")
+            try:
+                subprocess.Popen([launch_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                show_toast("Starting SC7 Rack...")
+                root.after(1500, refresh_status)
+            except Exception as e:
+                show_toast(f"Error launching: {e}", is_error=True)
+
+    btn_rack_toggle = tk.Button(
+        actions_frame,
+        text="Stop Rack" if is_running else "Launch Rack",
+        command=toggle_rack,
+        font=("sans-serif", 9),
+        fg=TEXT_MUTED,
+        bg="#222634",
+        activebackground="#2e3549",
+        activeforeground=TEXT_MAIN,
+        relief=tk.FLAT,
+        highlightthickness=1,
+        highlightbackground=BORDER_COLOR,
+        padx=12,
+        pady=6,
+        cursor="hand2"
+    )
+    btn_rack_toggle.pack(side=tk.LEFT)
+
+    def refresh_status():
+        r = get_rack_status()
+        if r["running"]:
+            status_pill.config(text=f"● Active (PID {r['pid']})", fg=GREEN_COLOR)
+            btn_rack_toggle.config(text="Stop Rack")
+        else:
+            status_pill.config(text="○ Stopped", fg=TEXT_MUTED)
+            btn_rack_toggle.config(text="Launch Rack")
+
+    # Right side buttons: Close, Save & Apply
+    def on_close():
+        root.destroy()
+
+    def on_save():
+        path_val = path_var.get().strip()
+        if not path_val:
+            show_toast("Files path cannot be empty", is_error=True)
+            return
+        if not os.path.exists(path_val):
+            try:
+                os.makedirs(path_val, exist_ok=True)
+            except Exception as e:
+                show_toast(f"Cannot create directory: {e}", is_error=True)
+                return
+
+        settings["autostart"] = autostart_var.get()
+        settings["share_clipboard"] = clipboard_var.get()
+        settings["files_path"] = path_val
+
+        save_settings(settings)
+        show_toast("✓ Settings saved and applied successfully")
+        refresh_status()
+
+    btn_save = tk.Button(
+        actions_frame,
+        text="Save & Apply",
+        command=on_save,
+        font=("sans-serif", 9, "bold"),
+        fg="#ffffff",
+        bg=ACCENT_BLUE,
+        activebackground="#4a85f8",
+        activeforeground="#ffffff",
+        relief=tk.FLAT,
+        highlightthickness=0,
+        padx=16,
+        pady=6,
+        cursor="hand2"
+    )
+    btn_save.pack(side=tk.RIGHT, padx=(8, 0))
+
+    btn_close = tk.Button(
+        actions_frame,
+        text="Close",
+        command=on_close,
+        font=("sans-serif", 9),
+        fg=TEXT_MAIN,
+        bg="#222634",
+        activebackground="#2e3549",
+        activeforeground=TEXT_MAIN,
+        relief=tk.FLAT,
+        highlightthickness=1,
+        highlightbackground=BORDER_COLOR,
+        padx=14,
+        pady=6,
+        cursor="hand2"
+    )
+    btn_close.pack(side=tk.RIGHT)
+
+    # Key Bindings
+    root.bind("<Escape>", lambda e: on_close())
+    root.bind("<Control-s>", lambda e: on_save())
+    root.bind("<Control-S>", lambda e: on_save())
+
+    # Periodically check status
+    def poll():
+        refresh_status()
+        root.after(3000, poll)
+
+    root.after(3000, poll)
+    root.mainloop()
 
 def main():
     settings = load_settings()
     args = sys.argv[1:]
 
-    if not args or "--gui" in args:
+    if not args:
         if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
             show_gui(settings)
         else:
             print_status(settings)
+        return
+
+    if "--gui" in args:
+        show_gui(settings)
         return
 
     if "--status" in args or "status" in args:
@@ -192,11 +544,11 @@ def main():
             changed = True
         elif arg in ("--help", "-h"):
             print("Usage: sc7-rack-settings [OPTIONS]")
-            print("  --status                  Print current settings and bridge status")
-            print("  --autostart [on|off]      Toggle or set start at login")
-            print("  --share-clipboard [on|off] Toggle or set desktop clipboard sharing")
-            print("  --files-path <path>       Set path for nested COSMIC Files")
             print("  --gui                     Open graphical settings dialog")
+            print("  --status                  Print current settings and status")
+            print("  --autostart [on|off]      Configure Start at login")
+            print("  --share-clipboard [on|off] Configure desktop clipboard sharing")
+            print("  --files-path <path>       Set path for nested COSMIC Files")
             return
         i += 1
 

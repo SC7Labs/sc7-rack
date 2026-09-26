@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=SC7 Rack
+GenericName=Developer Rack Compositor
+Comment=Nested 2x2 multi-application workspace for COSMIC desktop
+Exec=/home/sc7/bin/sc7-rack
+Icon=sc7-rack
+Terminal=false
+Categories=Development;System;Utility;X-COSMIC;
+Keywords=rack;sway;cosmic;compositor;nested;grid;workspace;terminal;files;monitor;htop;
+StartupWMClass=sc7-rack
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=SC7 Rack Settings
+Exec=/home/sc7/bin/sc7-rack-settings --gui
+Icon=sc7-rack
