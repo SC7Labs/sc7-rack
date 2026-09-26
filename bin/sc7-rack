@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if pgrep -f '[s]way.*sc7-rack/config' >/dev/null 2>&1; then
+    echo "SC7 Rack is already running."
+    exit 0
+fi
+
+# Preserve host Wayland display before Sway creates the child display
+export SC7_HOST_WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+
+# Use Wayland backend for nested operation inside host compositor
+export WLR_BACKENDS=wayland
+export WLR_LIBINPUT_NO_DEVICES=1
+
+CONFIG_FILE="$HOME/.config/sc7-rack/config"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    mkdir -p "$HOME/.config/sc7-rack"
+    cp "/home/sc7/projects/opensource projects/sc7-rack/config/config" "$CONFIG_FILE"
+fi
+
+exec sway --config "$CONFIG_FILE"

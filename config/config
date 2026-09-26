@@ -1,0 +1,17 @@
+# SC7 Rack - nested Sway config
+# COSMIC sees one outer window. Everything below is tiled INSIDE it.
+
+set $mod Mod4
+
+default_border none
+default_floating_border none
+gaps inner 5
+gaps outer 0
+smart_gaps off
+focus_follows_mouse no
+mouse_warping none
+xwayland disable
+output * bg #090909 solid_color
+workspace 1
+bindsym $mod+Shift+q exit
+exec_always --no-startup-id "/home/sc7/.config/sc7-rack/inner.sh"

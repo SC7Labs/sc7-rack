@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import subprocess
+
+CONFIG_DIR = os.path.expanduser("~/.config/sc7-rack")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
+AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "sc7-rack.desktop")
+PROJECT_ROOT = "/home/sc7/projects/opensource projects/sc7-rack"
+
+DEFAULT_SETTINGS = {
+    "autostart": False,
+    "share_clipboard": True,
+    "files_path": "/home/sc7/projects/portfolio"
+}
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        return dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            data = json.load(f)
+            settings = dict(DEFAULT_SETTINGS)
+            settings.update(data)
+            return settings
+    except Exception:
+        return dict(DEFAULT_SETTINGS)
+
+def save_settings(settings):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+    sync_autostart(settings.get("autostart", False))
+
+def sync_autostart(enabled):
+    os.makedirs(AUTOSTART_DIR, exist_ok=True)
+    if enabled:
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=SC7 Rack\n"
+            "Comment=SC7 Rack nested compositor desktop\n"
+            f"Exec={os.path.expanduser('~/bin/sc7-rack')}\n"
+            "Terminal=false\n"
+            "Categories=System;\n"
+        )
+        with open(AUTOSTART_FILE, "w") as f:
+            f.write(content)
+    else:
+        if os.path.exists(AUTOSTART_FILE):
+            os.remove(AUTOSTART_FILE)
+
+def get_bridge_status():
+    host_disp = os.environ.get("SC7_HOST_WAYLAND_DISPLAY", "")
+    rack_disp = ""
+    is_running = False
+
+    try:
+        out = subprocess.check_output(["pgrep", "-a", "-f", "sc7-clipboard-bridge"], text=True)
+        for line in out.strip().splitlines():
+            if "sc7-clipboard-bridge" in line:
+                is_running = True
+                parts = line.split()
+                if "--host" in parts:
+                    host_disp = parts[parts.index("--host") + 1]
+                if "--nested" in parts:
+                    rack_disp = parts[parts.index("--nested") + 1]
+                break
+    except Exception:
+        pass
+
+    if not host_disp or not rack_disp:
+        uid = os.getuid()
+        rundir = f"/run/user/{uid}"
+        try:
+            sockets = [s for s in os.listdir(rundir) if s.startswith("wayland-") and not s.endswith(".lock")]
+            sockets.sort()
+            if len(sockets) >= 2:
+                host_disp = host_disp or sockets[0]
+                rack_disp = rack_disp or sockets[1]
+            elif len(sockets) == 1:
+                host_disp = host_disp or sockets[0]
+                rack_disp = rack_disp or "wayland-X"
+        except Exception:
+            pass
+
+    return {
+        "running": is_running,
+        "host": host_disp or "wayland-1",
+        "rack": rack_disp or "wayland-2"
+    }
+
+def print_status(settings):
+    bridge = get_bridge_status()
+    autostart_mark = "[x]" if settings.get("autostart") else "[ ]"
+    clipboard_mark = "[x]" if settings.get("share_clipboard") else "[ ]"
+
+    print("========================================")
+    print("SC7 Rack Settings & Status")
+    print("========================================")
+    print(f"{autostart_mark} Start SC7 Rack at login")
+    print(f"{clipboard_mark} Share clipboard with desktop")
+    print(f"Files path: {settings.get('files_path', '/home/sc7/projects/portfolio')}")
+    print("----------------------------------------")
+    print(f"Clipboard bridge: {'Connected' if bridge['running'] else 'Disconnected'}")
+    print(f"Host: COSMIC / {bridge['host']}")
+    print(f"Rack: Sway / {bridge['rack']}")
+    print("========================================")
+
+def show_gui(settings):
+    if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+        print_status(settings)
+        return
+
+    # Check if zenity is available
+    has_zenity = subprocess.run(["which", "zenity"], capture_output=True).returncode == 0
+    if not has_zenity:
+        print_status(settings)
+        return
+
+    # Simple zenity forms or list dialog
+    # Checklist for options
+    autostart_val = "TRUE" if settings.get("autostart") else "FALSE"
+    clipboard_val = "TRUE" if settings.get("share_clipboard") else "FALSE"
+
+    cmd = [
+        "zenity", "--list", "--checklist",
+        "--title=SC7 Rack Settings",
+        "--text=Configure SC7 Rack options:",
+        "--column=Enable", "--column=Setting", "--column=Description",
+        autostart_val, "autostart", "Start SC7 Rack at login",
+        clipboard_val, "share_clipboard", "Share clipboard with desktop",
+        "--width=450", "--height=220"
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            selected = [x.strip() for x in res.stdout.split("|")]
+            settings["autostart"] = "autostart" in selected
+            settings["share_clipboard"] = "share_clipboard" in selected
+            save_settings(settings)
+            print("Settings updated successfully.")
+            print_status(settings)
+    except Exception as e:
+        print(f"GUI error: {e}")
+        print_status(settings)
+
+def main():
+    settings = load_settings()
+    args = sys.argv[1:]
+
+    if not args or "--gui" in args:
+        if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+            show_gui(settings)
+        else:
+            print_status(settings)
+        return
+
+    if "--status" in args or "status" in args:
+        print_status(settings)
+        return
+
+    changed = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--autostart":
+            if i + 1 < len(args) and args[i+1].lower() in ("on", "true", "1", "yes"):
+                settings["autostart"] = True
+                i += 1
+            elif i + 1 < len(args) and args[i+1].lower() in ("off", "false", "0", "no"):
+                settings["autostart"] = False
+                i += 1
+            else:
+                settings["autostart"] = not settings.get("autostart", False)
+            changed = True
+        elif arg == "--share-clipboard":
+            if i + 1 < len(args) and args[i+1].lower() in ("on", "true", "1", "yes"):
+                settings["share_clipboard"] = True
+                i += 1
+            elif i + 1 < len(args) and args[i+1].lower() in ("off", "false", "0", "no"):
+                settings["share_clipboard"] = False
+                i += 1
+            else:
+                settings["share_clipboard"] = not settings.get("share_clipboard", True)
+            changed = True
+        elif arg == "--files-path" and i + 1 < len(args):
+            settings["files_path"] = args[i+1]
+            i += 1
+            changed = True
+        elif arg in ("--help", "-h"):
+            print("Usage: sc7-rack-settings [OPTIONS]")
+            print("  --status                  Print current settings and bridge status")
+            print("  --autostart [on|off]      Toggle or set start at login")
+            print("  --share-clipboard [on|off] Toggle or set desktop clipboard sharing")
+            print("  --files-path <path>       Set path for nested COSMIC Files")
+            print("  --gui                     Open graphical settings dialog")
+            return
+        i += 1
+
+    if changed:
+        save_settings(settings)
+        print("Updated settings:")
+    print_status(settings)
+
+if __name__ == "__main__":
+    main()
