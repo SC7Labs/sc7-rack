@@ -9,6 +9,12 @@ fi
 # Preserve host Wayland display before Sway creates the child display
 export SC7_HOST_WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WLROOTS_BUILD="$SCRIPT_DIR/vendor/wlroots/build"
+if [[ -d "$WLROOTS_BUILD" && -f "$WLROOTS_BUILD/libwlroots.so.12" ]]; then
+    export LD_LIBRARY_PATH="$WLROOTS_BUILD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 # Use Wayland backend for nested operation inside host compositor
 export WLR_BACKENDS=wayland
 export WLR_LIBINPUT_NO_DEVICES=1
