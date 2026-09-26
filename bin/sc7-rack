@@ -1,16 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure essential paths in environment
+export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+# If SC7 Rack is already running, notify user and exit cleanly
 if pgrep -f '[s]way.*sc7-rack/config' >/dev/null 2>&1; then
     echo "SC7 Rack is already running."
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "SC7 Rack" "SC7 Rack is already running on your desktop." --icon=sc7-rack 2>/dev/null || true
+    fi
     exit 0
 fi
 
-# Preserve host Wayland display before Sway creates the child display
-export SC7_HOST_WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+# Ensure host Wayland display is preserved for Sway and inner child processes
+HOST_DISP="${SC7_HOST_WAYLAND_DISPLAY:-${WAYLAND_DISPLAY:-wayland-1}}"
+export SC7_HOST_WAYLAND_DISPLAY="$HOST_DISP"
+export WAYLAND_DISPLAY="$HOST_DISP"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-COSMIC}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WLROOTS_BUILD="$SCRIPT_DIR/vendor/wlroots/build"
+# Clean up stale non-host wayland sockets/locks if previous session terminated abnormally
+shopt -s nullglob
+for lockfile in "/run/user/$UID"/wayland-[0-9]*.lock; do
+    if [[ -f "$lockfile" ]] && ! fuser "$lockfile" >/dev/null 2>&1; then
+        sock="${lockfile%.lock}"
+        if [[ "$(basename "$sock")" != "$HOST_DISP" ]]; then
+            rm -f "$sock" "$lockfile"
+        fi
+    fi
+done
+shopt -u nullglob
+
+# Resolve real path of this script to find the repository root even via symlinks
+REAL_BIN="$(readlink -f "$0")"
+PROJECT_ROOT="$(dirname "$(dirname "$REAL_BIN")")"
+
+# Prepend custom wlroots library build path
+WLROOTS_BUILD="$PROJECT_ROOT/vendor/wlroots/build"
 if [[ -d "$WLROOTS_BUILD" && -f "$WLROOTS_BUILD/libwlroots.so.12" ]]; then
     export LD_LIBRARY_PATH="$WLROOTS_BUILD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
@@ -22,7 +49,11 @@ export WLR_LIBINPUT_NO_DEVICES=1
 CONFIG_FILE="$HOME/.config/sc7-rack/config"
 if [[ ! -f "$CONFIG_FILE" ]]; then
     mkdir -p "$HOME/.config/sc7-rack"
-    cp "/home/sc7/projects/opensource projects/sc7-rack/config/config" "$CONFIG_FILE"
+    cp "$PROJECT_ROOT/config/config" "$CONFIG_FILE"
+fi
+if [[ ! -f "$HOME/.config/sc7-rack/inner.sh" ]]; then
+    cp "$PROJECT_ROOT/config/inner.sh" "$HOME/.config/sc7-rack/inner.sh"
+    chmod +x "$HOME/.config/sc7-rack/inner.sh"
 fi
 
 exec sway --config "$CONFIG_FILE"

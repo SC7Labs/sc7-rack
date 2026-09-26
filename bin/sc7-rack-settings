@@ -5,11 +5,28 @@ import sys
 import subprocess
 import signal
 
+# Ensure we run under an interpreter that has tkinter available for the GUI
+try:
+    import tkinter
+except ImportError:
+    candidates = [
+        "/home/sc7/miniconda3/bin/python3",
+        os.path.expanduser("~/miniconda3/bin/python3"),
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ]
+    for cand in candidates:
+        if os.path.isfile(cand) and cand != sys.executable:
+            r = subprocess.run([cand, "-c", "import tkinter"], capture_output=True)
+            if r.returncode == 0:
+                os.execv(cand, [cand] + sys.argv)
+
 CONFIG_DIR = os.path.expanduser("~/.config/sc7-rack")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "sc7-rack.desktop")
-PROJECT_ROOT = "/home/sc7/projects/opensource projects/sc7-rack"
+REAL_PATH = os.path.realpath(__file__)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(REAL_PATH))
 ICON_PATH = os.path.join(PROJECT_ROOT, "assets/icons/sc7-rack-128.png")
 
 DEFAULT_SETTINGS = {
@@ -328,11 +345,9 @@ def show_gui(settings):
         insertbackground=TEXT_MAIN,
         relief=tk.FLAT,
         highlightbackground=BORDER_COLOR,
-        highlightthickness=1,
-        padx=10,
-        pady=7
+        highlightthickness=1
     )
-    entry_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+    entry_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=5)
 
     def on_browse():
         current_dir = path_var.get()

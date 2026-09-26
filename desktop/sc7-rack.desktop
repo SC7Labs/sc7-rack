@@ -9,7 +9,7 @@ Icon=sc7-rack
 Terminal=false
 Categories=Development;System;Utility;X-COSMIC;
 Keywords=rack;sway;cosmic;compositor;nested;grid;workspace;terminal;files;monitor;htop;
-StartupWMClass=sc7-rack
+StartupWMClass=wlroots
 Actions=Settings;
 
 [Desktop Action Settings]
