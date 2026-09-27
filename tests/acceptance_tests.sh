@@ -21,7 +21,7 @@ log_fail() {
 }
 
 echo "=========================================================="
-echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-33)"
+echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-34)"
 echo "=========================================================="
 
 # Gate 1: Project location
@@ -360,6 +360,13 @@ if grep -E -q "wlroots Wayland Backend Ignores.*wl_data_device_manager" "$DND_DO
     log_pass 33 "Exact protocol blocker and minimal architecture change documented"
 else
     log_fail 33 "Blocker and architecture change documentation incomplete"
+fi
+
+# Gate 34: COSMIC Files feature parity test verification
+if bash "$PROJECT_ROOT/tests/cosmic_files_parity_tests.sh" >/dev/null 2>&1; then
+    log_pass 34 "COSMIC Files feature parity automated gates all pass"
+else
+    log_fail 34 "COSMIC Files feature parity automated gates failed"
 fi
 
 echo "=========================================================="

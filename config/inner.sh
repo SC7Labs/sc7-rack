@@ -96,6 +96,29 @@ print(walk(root))
 
 swaymsg workspace 1 >/dev/null
 
+# If 4 or more views already exist on workspace 1, do not re-tile
+CURRENT_VIEWS="$(
+    swaymsg -t get_tree -r 2>/dev/null |
+    python3 -c '
+import json,sys
+try:
+    root=json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit
+
+def walk(n):
+    c = 1 if (n.get("app_id") or n.get("window")) and n.get("type") == "con" else 0
+    for k in ("nodes","floating_nodes"):
+        for ch in n.get(k,[]):
+            c += walk(ch)
+    return c
+print(walk(root))
+' 2>/dev/null || echo 0
+)"
+if [[ "${CURRENT_VIEWS:-0}" -ge 4 ]]; then
+    exit 0
+fi
+
 # 1) TOP LEFT — GPU Monitor (configurable provider: auto | intel | nvidia | amd | custom)
 GPU_PROVIDER="auto"
 GPU_CUSTOM=""

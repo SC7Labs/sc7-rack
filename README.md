@@ -190,7 +190,7 @@ Run the automated test suite covering all 33 acceptance criteria:
 cd sc7-rack
 ./tests/acceptance_tests.sh
 ```
-All 33 gates are verified automated live:
+All 34 gates are verified automated live:
 - Gates 1–20: Base architecture, layout, binaries, narrow sudo rule, no cheat tools.
 - Gates 21–22: Bidirectional text copy/paste.
 - Gates 23–24: Bidirectional file copy/paste (`text/uri-list`).
@@ -200,3 +200,4 @@ All 33 gates are verified automated live:
 - Gate 28: Large payload streaming (5MB+) without hanging.
 - Gates 29–30: Clean lifecycle termination and automatic re-establishment.
 - Gates 31–33: Drag-and-drop investigation, blocker documentation, and architecture report.
+- Gate 34: Complete COSMIC Files feature parity verification (see [`docs/COSMIC_FILES_PARITY.md`](file:///home/sc7/projects/opensource%20projects/sc7-rack/docs/COSMIC_FILES_PARITY.md)).

@@ -4,7 +4,7 @@
 set $mod Mod4
 
 default_border none
-default_floating_border none
+default_floating_border normal
 gaps inner 5
 gaps outer 0
 smart_gaps off
@@ -14,4 +14,29 @@ xwayland disable
 output * bg #090909 solid_color
 workspace 1
 bindsym $mod+Shift+q exit
-exec_always --no-startup-id "${XDG_CONFIG_HOME:-$HOME/.config}/sc7-rack/inner.sh"
+exec --no-startup-id "${XDG_CONFIG_HOME:-$HOME/.config}/sc7-rack/inner.sh"
+
+# Floating window rules for dialogs and popups
+for_window [app_id="com.system76.CosmicFilesDialog"] floating enable, border normal, move position center
+for_window [app_id="com.system76.CosmicFilesDialogExample"] floating enable, border normal, move position center
+for_window [window_role="dialog"] floating enable
+for_window [window_role="pop-up"] floating enable
+for_window [window_type="dialog"] floating enable
+for_window [window_type="menu"] floating enable
+for_window [app_id="(?i).*dialog.*"] floating enable
+
+# Helper applications launched from COSMIC Files float instead of disrupting the 2x2 grid
+for_window [app_id="com.system76.CosmicEdit"] floating enable
+for_window [app_id="com.system76.CosmicViewer"] floating enable
+for_window [app_id="org.gnome.FileRoller"] floating enable
+for_window [app_id="org.gnome.Evince"] floating enable
+for_window [app_id="org.gnome.Loupe"] floating enable
+for_window [app_id="org.gnome.TextEditor"] floating enable
+for_window [app_id="eog"] floating enable
+for_window [app_id="gedit"] floating enable
+for_window [app_id="com.system76.CosmicPlayer"] floating enable
+for_window [app_id="com.system76.CosmicSettings.*"] floating enable
+for_window [app_id="com.system76.Popsicle"] floating enable
+for_window [app_id="io.github.celluloid_player.Celluloid"] floating enable
+for_window [app_id="vlc"] floating enable
+for_window [app_id="mpv"] floating enable
