@@ -160,11 +160,9 @@ wait_views 1 || true
 
 # 2) TOP RIGHT — files path
 swaymsg split h >/dev/null
-if [[ -z "${FILES_PATH:-}" || "$FILES_PATH" == "$HOME" ]]; then
-    cosmic-files >/dev/null 2>&1 &
-else
-    cosmic-files "$FILES_PATH" >/dev/null 2>&1 &
-fi
+TARGET_DIR="${FILES_PATH:-$HOME}"
+[[ -z "$TARGET_DIR" || ! -d "$TARGET_DIR" ]] && TARGET_DIR="$HOME"
+(cd "$TARGET_DIR" && cosmic-files "$TARGET_DIR" >/dev/null 2>&1 &)
 record_pid $!
 wait_views 2 || true
 
