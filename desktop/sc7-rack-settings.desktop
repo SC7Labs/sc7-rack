@@ -1,9 +1,9 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=SC7 Rack Settings
-GenericName=SC7 Rack Settings
-Comment=Configure SC7 Rack autostart, clipboard sharing, and files path
+Name=SC7Labs Rack Settings
+GenericName=SC7Labs Rack Settings
+Comment=Configure SC7Labs Rack autostart, clipboard sharing, and files path
 Exec=sc7-rack-settings --gui
 Icon=sc7-rack
 Terminal=false

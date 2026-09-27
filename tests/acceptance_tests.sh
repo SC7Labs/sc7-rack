@@ -147,7 +147,7 @@ fi
 
 # Gate 15: Settings status display output format
 STATUS_OUT="$("$SETTINGS_BIN" --status)"
-if echo "$STATUS_OUT" | grep -q "Start SC7 Rack at login" && \
+if echo "$STATUS_OUT" | grep -E -q "Start SC7(Labs)? Rack at login" && \
    echo "$STATUS_OUT" | grep -q "Share clipboard with desktop" && \
    echo "$STATUS_OUT" | grep -q "Clipboard bridge:"; then
     log_pass 15 "Settings status outputs clean, uncluttered status report"

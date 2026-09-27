@@ -1,8 +1,8 @@
-# SC7 Rack
+# SC7Labs Rack
 
 An integrated developer workstation rack for the **COSMIC Desktop Environment**.
 
-SC7 Rack presents **one outer COSMIC window** containing a native, nested Wayland compositor (**Sway / wlroots**) tiling four essential developer views in a crisp 2x2 grid:
+SC7Labs Rack presents **one outer COSMIC window** containing a native, nested Wayland compositor (**Sway / wlroots**) tiling four essential developer views in a crisp 2x2 grid:
 
 ```
 +-----------------------------------+-----------------------------------+
@@ -104,8 +104,8 @@ This will:
 5. Install FreeDesktop hicolor application icons and `.desktop` launchers for COSMIC App Library.
 6. Configure the `rack` shell alias.
 
-### Launching SC7 Rack
-Launch via the COSMIC App Menu by clicking **SC7 Rack**, or from terminal:
+### Launching SC7Labs Rack
+Launch via the COSMIC App Menu by clicking **SC7Labs Rack**, or from terminal:
 ```bash
 sc7-rack
 # or simply:
@@ -119,7 +119,7 @@ Press **`Super+Shift+Q`** to close the entire rack window and terminate all nest
 
 ## Settings & Status
 
-SC7 Rack includes a dedicated settings utility `sc7-rack-settings`:
+SC7Labs Rack includes a dedicated settings utility `sc7-rack-settings`:
 
 ### View Status
 ```bash
@@ -128,7 +128,7 @@ sc7-rack-settings --status
 Example Output:
 ```
 ========================================
-           SC7 Rack Settings
+        SC7Labs Rack Settings
 ========================================
 Status:             Running (PID 2133265)
 [ ] Start at login:     Disabled

@@ -77,14 +77,14 @@ def sync_autostart(enabled):
         content = (
             "[Desktop Entry]\n"
             "Type=Application\n"
-            "Name=SC7 Rack\n"
+            "Name=SC7Labs Rack\n"
             "GenericName=Developer Rack Compositor\n"
             "Comment=Nested 2x2 developer workspace with terminal, files, monitor, and htop\n"
             f"Exec={exec_path}\n"
             "Icon=sc7-rack\n"
             "Terminal=false\n"
             "Categories=COSMIC;System;Utility;Development;\n"
-            "StartupWMClass=wlroots\n"
+            "StartupWMClass=dev.sc7labs.rack\n"
         )
         with open(AUTOSTART_FILE, "w") as f:
             f.write(content)
@@ -222,10 +222,10 @@ def print_status(settings):
     clipboard_mark = "[x]" if settings.get("share_clipboard") else "[ ]"
 
     print("========================================")
-    print("           SC7 Rack Settings")
+    print("        SC7Labs Rack Settings")
     print("========================================")
     print(f"Status:                      {'Running (PID ' + str(rack['pid']) + ')' if rack['running'] else 'Stopped'}")
-    print(f"{autostart_mark} Start SC7 Rack at login:     {'Enabled' if settings.get('autostart') else 'Disabled'}")
+    print(f"{autostart_mark} Start SC7Labs Rack at login: {'Enabled' if settings.get('autostart') else 'Disabled'}")
     print(f"{clipboard_mark} Share clipboard with desktop: {'Enabled' if settings.get('share_clipboard') else 'Disabled'}")
     print(f"Files path:                  {settings.get('files_path', DEFAULT_SETTINGS['files_path'])}")
     print(f"GPU Provider:                {settings.get('gpu_provider', 'auto')}")
@@ -241,7 +241,7 @@ def show_gui(settings):
     if not HAS_TKINTER:
         msg = (
             "Error: Python Tkinter (python3-tk) is not installed.\n"
-            "The SC7 Rack Settings graphical interface requires Tkinter.\n\n"
+            "The SC7Labs Rack Settings graphical interface requires Tkinter.\n\n"
             "To install it, run:\n"
             "  sudo apt install python3-tk      (Debian / Ubuntu / Pop!_OS)\n"
             "  sudo dnf install python3-tkinter (Fedora)\n"
@@ -255,14 +255,14 @@ def show_gui(settings):
             if shutil.which("notify-send"):
                 subprocess.run([
                     "notify-send",
-                    "SC7 Rack Settings",
+                    "SC7Labs Rack Settings",
                     "python3-tk is required to open Settings GUI.\nRun: sudo apt install python3-tk",
                     "--icon=dialog-error"
                 ], stderr=subprocess.DEVNULL)
         sys.exit(1)
 
     root = tk.Tk()
-    root.title("SC7 Rack Settings")
+    root.title("SC7Labs Rack Settings")
     root.geometry("540x590")
     root.minsize(500, 560)
 
@@ -304,7 +304,7 @@ def show_gui(settings):
     header_left = tk.Frame(header_frame, bg=CARD_BG)
     header_left.pack(side=tk.LEFT, fill=tk.Y)
 
-    title_label = tk.Label(header_left, text="SC7 Rack", font=("sans-serif", 16, "bold"),
+    title_label = tk.Label(header_left, text="SC7Labs Rack", font=("sans-serif", 16, "bold"),
                            fg=TEXT_MAIN, bg=CARD_BG)
     title_label.pack(anchor="w")
 
@@ -333,7 +333,7 @@ def show_gui(settings):
 
     chk_autostart = tk.Checkbutton(
         options_frame,
-        text="Start SC7 Rack at login",
+        text="Start SC7Labs Rack at login",
         variable=autostart_var,
         font=("sans-serif", 11, "bold"),
         fg=TEXT_MAIN,
@@ -349,7 +349,7 @@ def show_gui(settings):
 
     desc_autostart = tk.Label(
         options_frame,
-        text="Automatically launches SC7 Rack when you log into your desktop session",
+        text="Automatically launches SC7Labs Rack when you log into your desktop session",
         font=("sans-serif", 9),
         fg=TEXT_MUTED,
         bg=CARD_BG
@@ -532,14 +532,14 @@ def show_gui(settings):
         if r["running"]:
             try:
                 subprocess.run([rack_bin, "--stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                show_toast("Stopping SC7 Rack...")
+                show_toast("Stopping SC7Labs Rack...")
                 root.after(1000, refresh_status)
             except Exception as e:
                 show_toast(f"Error stopping: {e}", is_error=True)
         else:
             try:
                 subprocess.Popen([rack_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                show_toast("Starting SC7 Rack...")
+                show_toast("Starting SC7Labs Rack...")
                 root.after(1500, refresh_status)
             except Exception as e:
                 show_toast(f"Error launching: {e}", is_error=True)

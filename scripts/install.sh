@@ -102,6 +102,7 @@ fi
 # 7. Install .desktop launchers
 cp "$SCRIPT_DIR/desktop/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack.desktop"
 cp "$SCRIPT_DIR/desktop/sc7-rack-settings.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
+ln -sf sc7-rack.desktop "$XDG_DATA_HOME/applications/dev.sc7labs.rack.desktop"
 chmod 644 "$XDG_DATA_HOME/applications/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -115,9 +116,9 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     fi
 done
 
-echo "SC7 Rack installed successfully."
-echo "Launch via COSMIC App Menu: 'SC7 Rack' or 'SC7 Rack Settings'"
+echo "SC7Labs Rack installed successfully."
+echo "Launch via COSMIC App Menu: 'SC7Labs Rack' or 'SC7Labs Rack Settings'"
 echo "CLI Commands:"
-echo "  sc7-rack             - Launch SC7 Rack"
+echo "  sc7-rack             - Launch SC7Labs Rack"
 echo "  sc7-rack-settings    - Manage settings (GUI / CLI)"
 echo "  rack                 - Shell shortcut"

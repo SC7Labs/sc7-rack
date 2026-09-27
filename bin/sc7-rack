@@ -67,15 +67,15 @@ get_running_rack_pid() {
 # Handle command line flags
 if [[ "${1:-}" == "--status" ]]; then
     if RUNNING_PID="$(get_running_rack_pid)"; then
-        echo "SC7 Rack is running (PID $RUNNING_PID)"
+        echo "SC7Labs Rack is running (PID $RUNNING_PID)"
         exit 0
     else
-        echo "SC7 Rack is not running"
+        echo "SC7Labs Rack is not running"
         exit 1
     fi
 elif [[ "${1:-}" == "--stop" ]]; then
     if RUNNING_PID="$(get_running_rack_pid)"; then
-        echo "Stopping SC7 Rack (PID $RUNNING_PID)..."
+        echo "Stopping SC7Labs Rack (PID $RUNNING_PID)..."
         kill -TERM "$RUNNING_PID" 2>/dev/null || true
         for ((i=0; i<30; i++)); do
             if ! kill -0 "$RUNNING_PID" 2>/dev/null; then
@@ -96,24 +96,24 @@ elif [[ "${1:-}" == "--stop" ]]; then
             rm -f "$INNER_PIDS_FILE"
         fi
         rm -f "$PID_FILE"
-        echo "SC7 Rack stopped."
+        echo "SC7Labs Rack stopped."
     else
-        echo "SC7 Rack is not running."
+        echo "SC7Labs Rack is not running."
     fi
     exit 0
 elif [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "Usage: sc7-rack [--status | --stop | --help]"
-    echo "  (no args) Launch SC7 Rack workspace"
-    echo "  --status  Check if SC7 Rack is currently active"
-    echo "  --stop    Cleanly stop running SC7 Rack instances"
+    echo "  (no args) Launch SC7Labs Rack workspace"
+    echo "  --status  Check if SC7Labs Rack is currently active"
+    echo "  --stop    Cleanly stop running SC7Labs Rack instances"
     exit 0
 fi
 
 # Check if already running
 if RUNNING_PID="$(get_running_rack_pid)"; then
-    echo "SC7 Rack is already running (PID $RUNNING_PID)."
+    echo "SC7Labs Rack is already running (PID $RUNNING_PID)."
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send "SC7 Rack" "SC7 Rack is already running on your desktop." --icon=sc7-rack 2>/dev/null || true
+        notify-send "SC7Labs Rack" "SC7Labs Rack is already running on your desktop." --icon=sc7-rack 2>/dev/null || true
     fi
     exit 0
 fi
@@ -133,6 +133,8 @@ export SC7_HOST_WAYLAND_DISPLAY="$HOST_DISP"
 export WAYLAND_DISPLAY="$HOST_DISP"
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-COSMIC}"
 export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}"
+export SC7_APP_ID="dev.sc7labs.rack"
+export SC7_APP_TITLE="SC7Labs Rack"
 
 # Clean up stale non-host wayland sockets/locks if previous session terminated abnormally
 shopt -s nullglob
@@ -160,7 +162,7 @@ export WLR_LIBINPUT_NO_DEVICES=1
 if ! command -v sway >/dev/null 2>&1; then
     echo "Error: 'sway' is not installed or not in PATH." >&2
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send "SC7 Rack" "Error: sway is not installed." --icon=dialog-error 2>/dev/null || true
+        notify-send "SC7Labs Rack" "Error: sway is not installed." --icon=dialog-error 2>/dev/null || true
     fi
     exit 1
 fi
