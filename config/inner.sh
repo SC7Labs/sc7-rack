@@ -160,7 +160,11 @@ wait_views 1 || true
 
 # 2) TOP RIGHT — files path
 swaymsg split h >/dev/null
-cosmic-files "$FILES_PATH" >/dev/null 2>&1 &
+if [[ -z "${FILES_PATH:-}" || "$FILES_PATH" == "$HOME" ]]; then
+    cosmic-files >/dev/null 2>&1 &
+else
+    cosmic-files "$FILES_PATH" >/dev/null 2>&1 &
+fi
 record_pid $!
 wait_views 2 || true
 
