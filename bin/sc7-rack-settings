@@ -12,14 +12,12 @@ try:
     HAS_TKINTER = True
 except ImportError:
     HAS_TKINTER = False
-    # Attempt to locate an alternate python on the system that has tkinter installed
-    _home = os.path.expanduser("~")
+    # Attempt to locate an alternate system python that has tkinter installed
     _candidates = [
         shutil.which("python3"),
         shutil.which("python"),
-        os.path.join(_home, "miniconda3/bin/python3"),
-        os.path.join(_home, "anaconda3/bin/python3"),
         "/usr/local/bin/python3",
+        "/usr/bin/python3",
     ]
     for _cand in _candidates:
         if _cand and os.path.exists(_cand) and _cand != sys.executable:
