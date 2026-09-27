@@ -8,23 +8,164 @@ XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
 
-mkdir -p "$HOME/bin" "$XDG_BIN_HOME" "$XDG_CONFIG_HOME/sc7-rack" "$XDG_DATA_HOME/applications"
+INSTALL_FAILED=false
 
-# 1. Check Python and Tkinter dependencies
-echo "Checking Python dependencies..."
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "Error: Python 3 is required but not installed." >&2
+# ─── Phase 1: Validate mandatory runtime dependencies ───────────────────────
+
+echo ""
+echo "── Checking mandatory runtime dependencies ──"
+
+# Mandatory commands and their apt package mappings (empty = no known apt package)
+declare -A APT_PACKAGES=(
+    [sway]="sway"
+    [swaymsg]=""        # provided by sway package
+    [cosmic-term]=""    # COSMIC desktop component
+    [cosmic-files]=""   # COSMIC desktop component
+    [cosmic-monitor]="" # COSMIC desktop component
+    [htop]="htop"
+    [python3]="python3"
+)
+
+MANDATORY_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3)
+MISSING_CMDS=()
+APT_INSTALLABLE=()
+COSMIC_MISSING=()
+
+for cmd in "${MANDATORY_CMDS[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        MISSING_CMDS+=("$cmd")
+        case "$cmd" in
+            cosmic-term|cosmic-files|cosmic-monitor)
+                COSMIC_MISSING+=("$cmd")
+                ;;
+            *)
+                pkg="${APT_PACKAGES[$cmd]:-}"
+                if [[ -n "$pkg" ]]; then
+                    APT_INSTALLABLE+=("$pkg")
+                fi
+                ;;
+        esac
+    else
+        echo "  ✓ $cmd"
+    fi
+done
+
+# Attempt to install apt-available packages on apt-based systems
+if [[ ${#APT_INSTALLABLE[@]} -gt 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    echo ""
+    echo "The following packages can be installed via apt: ${APT_INSTALLABLE[*]}"
+
+    CAN_SUDO=false
+    if sudo -n true 2>/dev/null; then
+        CAN_SUDO=true
+    fi
+
+    if [[ "$CAN_SUDO" == "true" ]]; then
+        echo "Installing: ${APT_INSTALLABLE[*]}"
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq "${APT_INSTALLABLE[@]}"
+
+        # Re-check which commands are now available
+        NEW_MISSING=()
+        for cmd in "${MISSING_CMDS[@]}"; do
+            case "$cmd" in
+                cosmic-term|cosmic-files|cosmic-monitor)
+                    NEW_MISSING+=("$cmd")
+                    ;;
+                *)
+                    if command -v "$cmd" >/dev/null 2>&1; then
+                        echo "  ✓ $cmd (installed)"
+                    else
+                        NEW_MISSING+=("$cmd")
+                    fi
+                    ;;
+            esac
+        done
+        MISSING_CMDS=("${NEW_MISSING[@]}")
+
+        # After installing sway, verify swaymsg is also available
+        if command -v sway >/dev/null 2>&1 && ! command -v swaymsg >/dev/null 2>&1; then
+            echo "  ✗ swaymsg is still missing after installing sway" >&2
+            if [[ ! " ${MISSING_CMDS[*]} " =~ " swaymsg " ]]; then
+                MISSING_CMDS+=("swaymsg")
+            fi
+        fi
+    else
+        echo ""
+        echo "Cannot install packages automatically (no passwordless sudo)."
+        echo "Please install manually:"
+        for pkg in "${APT_INSTALLABLE[@]}"; do
+            echo "  sudo apt install $pkg"
+        done
+    fi
+fi
+
+# Stop if COSMIC components are missing
+if [[ ${#COSMIC_MISSING[@]} -gt 0 ]]; then
+    echo "" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "  ERROR: Missing COSMIC desktop components" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "" >&2
+    echo "  SC7Labs Rack currently requires a COSMIC desktop environment." >&2
+    echo "" >&2
+    echo "  Missing commands:" >&2
+    for cmd in "${COSMIC_MISSING[@]}"; do
+        echo "    ✗ $cmd" >&2
+    done
+    echo "" >&2
+    echo "  These are part of the COSMIC desktop (https://system76.com/cosmic)." >&2
+    echo "  Please install COSMIC and try again." >&2
+    echo "════════════════════════════════════════════════════════════" >&2
     exit 1
 fi
 
-if ! /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
+# Stop if any other mandatory dependencies are still missing
+NON_COSMIC_MISSING=()
+for cmd in "${MISSING_CMDS[@]}"; do
+    case "$cmd" in
+        cosmic-term|cosmic-files|cosmic-monitor) ;; # already handled above
+        *) NON_COSMIC_MISSING+=("$cmd") ;;
+    esac
+done
+
+if [[ ${#NON_COSMIC_MISSING[@]} -gt 0 ]]; then
+    echo "" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "  ERROR: Missing mandatory runtime dependencies" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "" >&2
+    echo "  The following required commands are not available:" >&2
+    for cmd in "${NON_COSMIC_MISSING[@]}"; do
+        echo "    ✗ $cmd" >&2
+    done
+    echo "" >&2
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "  Install with:  sudo apt install sway htop python3" >&2
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "  Install with:  sudo dnf install sway htop python3" >&2
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "  Install with:  sudo pacman -S sway htop python3" >&2
+    fi
+    echo "════════════════════════════════════════════════════════════" >&2
+    exit 1
+fi
+
+echo ""
+echo "All mandatory runtime dependencies satisfied."
+
+# ─── Phase 1b: Check Python Tkinter (optional but helpful) ──────────────────
+
+echo ""
+echo "── Checking Python Tkinter ──"
+if ! python3 -c "import tkinter" >/dev/null 2>&1; then
     echo "Notice: Python Tkinter (python3-tk) is not installed."
     echo "The graphical settings window requires python3-tk."
     if sudo -n true 2>/dev/null && command -v apt-get >/dev/null 2>&1; then
         echo "Attempting non-interactive install of python3-tk via apt..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq python3-tk || true
+        sudo apt-get install -y -qq python3-tk || true
     fi
-    if ! /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
+    if ! python3 -c "import tkinter" >/dev/null 2>&1; then
         echo "To use the GUI settings window, please install python3-tk:"
         if command -v apt-get >/dev/null 2>&1; then
             echo "  sudo apt install python3-tk"
@@ -35,17 +176,33 @@ if ! /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
         fi
         echo "Settings can still be managed via CLI: sc7-rack-settings --status"
     else
-        echo "python3-tk installed successfully."
+        echo "  ✓ python3-tk installed successfully."
     fi
 else
-    echo "Python Tkinter support: OK"
+    echo "  ✓ Python Tkinter support: OK"
 fi
 
-# 2. Build clipboard bridge
-echo "Building clipboard bridge..."
+# ─── Phase 1c: Report optional GPU tools ────────────────────────────────────
+
+echo ""
+echo "── Checking optional GPU tools ──"
+OPTIONAL_GPU_CMDS=(intel_gpu_top nvidia-smi nvtop radeontop)
+for cmd in "${OPTIONAL_GPU_CMDS[@]}"; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        echo "  ✓ $cmd (available)"
+    else
+        echo "  ○ $cmd (not found — the rack will use fallback messaging)"
+    fi
+done
+
+# ─── Phase 2: Build clipboard bridge ────────────────────────────────────────
+
+echo ""
+echo "── Building clipboard bridge ──"
 make -C "$SCRIPT_DIR/bridge"
 
-# 3. Setup sudo rule for intel_gpu_top if passwordless sudo is configured
+# ─── Phase 3: Setup sudo rule for intel_gpu_top ─────────────────────────────
+
 IGT="$(command -v intel_gpu_top || true)"
 if [[ -n "$IGT" ]] && sudo -n true 2>/dev/null; then
     SUDOERS="/etc/sudoers.d/sc7-intel-gpu-top"
@@ -58,7 +215,10 @@ if [[ -n "$IGT" ]] && sudo -n true 2>/dev/null; then
     fi
 fi
 
-# 4. Copy config files (do NOT overwrite existing settings.json)
+# ─── Phase 4: Copy config files (preserve existing settings) ────────────────
+
+mkdir -p "$HOME/bin" "$XDG_BIN_HOME" "$XDG_CONFIG_HOME/sc7-rack" "$XDG_DATA_HOME/applications"
+
 cp "$SCRIPT_DIR/config/config" "$XDG_CONFIG_HOME/sc7-rack/config"
 cp "$SCRIPT_DIR/config/inner.sh" "$XDG_CONFIG_HOME/sc7-rack/inner.sh"
 chmod +x "$XDG_CONFIG_HOME/sc7-rack/inner.sh"
@@ -71,15 +231,19 @@ else
     echo "Preserved existing user settings at $SETTINGS_DEST"
 fi
 
-# 5. Link binaries to ~/.local/bin and ~/bin
+# ─── Phase 5: Link binaries to ~/.local/bin and ~/bin ────────────────────────
+
 for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
     mkdir -p "$bindir"
     ln -sf "$SCRIPT_DIR/bin/sc7-rack" "$bindir/sc7-rack"
     ln -sf "$SCRIPT_DIR/bin/sc7-rack-settings" "$bindir/sc7-rack-settings"
     ln -sf "$SCRIPT_DIR/bin/sc7-clipboard-bridge" "$bindir/sc7-clipboard-bridge"
+    # Create 'rack' symlink pointing to sc7-rack
+    ln -sf "$SCRIPT_DIR/bin/sc7-rack" "$bindir/rack"
 done
 
-# 6. Install icons into hicolor theme
+# ─── Phase 6: Install icons into hicolor theme ──────────────────────────────
+
 HICOLOR="$XDG_DATA_HOME/icons/hicolor"
 mkdir -p "$HICOLOR/scalable/apps"
 cp "$SCRIPT_DIR/assets/icons/sc7-rack.svg" "$HICOLOR/scalable/apps/sc7-rack.svg"
@@ -99,7 +263,8 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t "$HICOLOR" 2>/dev/null || true
 fi
 
-# 7. Install .desktop launchers
+# ─── Phase 7: Install .desktop launchers ─────────────────────────────────────
+
 cp "$SCRIPT_DIR/desktop/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack.desktop"
 cp "$SCRIPT_DIR/desktop/sc7-rack-settings.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
 ln -sf sc7-rack.desktop "$XDG_DATA_HOME/applications/dev.sc7labs.rack.desktop"
@@ -109,16 +274,58 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$XDG_DATA_HOME/applications" 2>/dev/null || true
 fi
 
-# 8. Add shell alias
+# ─── Phase 8: Add shell alias ────────────────────────────────────────────────
+
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     if [[ -f "$rc" ]] && ! grep -qF "alias rack=" "$rc" 2>/dev/null; then
         printf "\nalias rack='sc7-rack'\n" >> "$rc"
     fi
 done
 
+# ─── Phase 9: Post-install runtime validation ───────────────────────────────
+
+echo ""
+echo "── Post-install runtime validation ──"
+VALIDATION_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop sc7-rack sc7-rack-settings)
+VALIDATION_FAILED=false
+
+# Ensure newly installed symlinks are findable
+export PATH="$XDG_BIN_HOME:$HOME/bin:$PATH"
+
+for cmd in "${VALIDATION_CMDS[@]}"; do
+    resolved="$(command -v "$cmd" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+        echo "  ✓ $cmd → $resolved"
+    else
+        echo "  ✗ $cmd NOT FOUND" >&2
+        VALIDATION_FAILED=true
+    fi
+done
+
+# Verify rack symlink
+for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
+    if [[ -L "$bindir/rack" ]]; then
+        echo "  ✓ $bindir/rack → $(readlink "$bindir/rack")"
+    else
+        echo "  ✗ $bindir/rack symlink missing" >&2
+        VALIDATION_FAILED=true
+    fi
+done
+
+if [[ "$VALIDATION_FAILED" == "true" ]]; then
+    echo "" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "  ERROR: Post-install validation failed." >&2
+    echo "  SC7Labs Rack was NOT installed successfully." >&2
+    echo "  Review the errors above and re-run ./install.sh" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    exit 1
+fi
+
+echo ""
 echo "SC7Labs Rack installed successfully."
 echo "Launch via COSMIC App Menu: 'SC7Labs Rack' or 'SC7Labs Rack Settings'"
 echo "CLI Commands:"
 echo "  sc7-rack             - Launch SC7Labs Rack"
 echo "  sc7-rack-settings    - Manage settings (GUI / CLI)"
-echo "  rack                 - Shell shortcut"
+echo "  rack                 - Shell shortcut (symlink + alias)"
