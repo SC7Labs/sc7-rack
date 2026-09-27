@@ -23,8 +23,15 @@ get_running_rack_pid() {
             if grep -q "sway" "/proc/$pid/cmdline" 2>/dev/null; then
                 for sock in "$RUNTIME_DIR"/sway-ipc.*."$pid".sock; do
                     if [[ -S "$sock" ]] && SWAYSOCK="$sock" swaymsg -t get_version >/dev/null 2>&1; then
-                        echo "$pid"
-                        return 0
+                        num_outputs="$(SWAYSOCK="$sock" swaymsg -t get_outputs 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "1")"
+                        if [[ "$num_outputs" -gt 0 ]]; then
+                            echo "$pid"
+                            return 0
+                        else
+                            kill -TERM "$pid" 2>/dev/null || true
+                            sleep 0.1
+                            kill -KILL "$pid" 2>/dev/null || true
+                        fi
                     fi
                 done
             fi
@@ -38,9 +45,16 @@ get_running_rack_pid() {
             if grep -q "sway" "/proc/$cpid/cmdline" 2>/dev/null; then
                 for sock in "$RUNTIME_DIR"/sway-ipc.*."$cpid".sock; do
                     if [[ -S "$sock" ]] && SWAYSOCK="$sock" swaymsg -t get_version >/dev/null 2>&1; then
-                        echo "$cpid" > "$PID_FILE"
-                        echo "$cpid"
-                        return 0
+                        num_outputs="$(SWAYSOCK="$sock" swaymsg -t get_outputs 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "1")"
+                        if [[ "$num_outputs" -gt 0 ]]; then
+                            echo "$cpid" > "$PID_FILE"
+                            echo "$cpid"
+                            return 0
+                        else
+                            kill -TERM "$cpid" 2>/dev/null || true
+                            sleep 0.1
+                            kill -KILL "$cpid" 2>/dev/null || true
+                        fi
                     fi
                 done
             fi
@@ -177,12 +191,14 @@ cleanup() {
             fi
         done < "$INNER_PIDS_FILE"
         sleep 0.1
-        while IFS= read -r cpid; do
-            if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
-                kill -KILL "$cpid" 2>/dev/null || true
-            fi
-        done < "$INNER_PIDS_FILE"
-        rm -f "$INNER_PIDS_FILE"
+        if [[ -f "$INNER_PIDS_FILE" ]]; then
+            while IFS= read -r cpid; do
+                if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+                    kill -KILL "$cpid" 2>/dev/null || true
+                fi
+            done < "$INNER_PIDS_FILE"
+            rm -f "$INNER_PIDS_FILE"
+        fi
     fi
 
     # 2. Terminate sway and its direct child tree

@@ -184,3 +184,15 @@ wait_views 4 || true
 # Explicitly normalize the row/column split percentages.
 swaymsg '[app_id="com.system76.CosmicFiles"] resize set width 50 ppt' >/dev/null 2>&1 || true
 swaymsg '[app_id="com.system76.CosmicMonitor"] resize set height 50 ppt' >/dev/null 2>&1 || true
+
+# Shutdown monitor: if output window is closed, cleanly terminate nested Sway
+(
+    swaymsg -t subscribe '["output"]' -m 2>/dev/null | while read -r _; do
+        num_outputs="$(swaymsg -t get_outputs 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "1")"
+        if [[ "$num_outputs" -eq 0 ]]; then
+            swaymsg exit 2>/dev/null || true
+            break
+        fi
+    done
+) &
+record_pid $!
