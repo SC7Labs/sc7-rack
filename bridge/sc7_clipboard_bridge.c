@@ -7,6 +7,8 @@
 #include <poll.h>
 #include <signal.h>
 #include <errno.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <wayland-client.h>
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 
@@ -341,19 +343,47 @@ static int setup_endpoint_device(struct bridge_endpoint *ep) {
     return 0;
 }
 
+static char *detect_wayland_display(const char *exclude) {
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    char path[1024];
+    if (!runtime_dir || !*runtime_dir) {
+        snprintf(path, sizeof(path), "/run/user/%d", (int)getuid());
+        runtime_dir = path;
+    }
+
+    DIR *d = opendir(runtime_dir);
+    if (!d) return NULL;
+
+    struct dirent *ent;
+    char found[256] = {0};
+    while ((ent = readdir(d)) != NULL) {
+        if (strncmp(ent->d_name, "wayland-", 8) == 0 && !strstr(ent->d_name, ".lock")) {
+            if (exclude && strcmp(ent->d_name, exclude) == 0) {
+                continue;
+            }
+            char sock_path[2048];
+            snprintf(sock_path, sizeof(sock_path), "%s/%s", runtime_dir, ent->d_name);
+            struct stat st;
+            if (stat(sock_path, &st) == 0 && S_ISSOCK(st.st_mode)) {
+                snprintf(found, sizeof(found), "%s", ent->d_name);
+                break;
+            }
+        }
+    }
+    closedir(d);
+    if (found[0]) {
+        return strdup(found);
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
     signal(SIGPIPE, SIG_IGN);
 
     const char *host_disp = getenv("SC7_HOST_WAYLAND_DISPLAY");
-    if (!host_disp || !*host_disp) {
-        host_disp = "wayland-1";
-    }
     const char *nested_disp = getenv("WAYLAND_DISPLAY");
-    if (!nested_disp || !*nested_disp) {
-        nested_disp = "wayland-2";
-    }
     bool debug = false;
 
     for (int i = 1; i < argc; i++) {
@@ -367,6 +397,25 @@ int main(int argc, char **argv) {
             printf("Usage: sc7-clipboard-bridge [--host <display>] [--nested <display>] [--debug]\n");
             return 0;
         }
+    }
+
+    char *detected_host = NULL;
+    char *detected_nested = NULL;
+
+    if (!host_disp || !*host_disp) {
+        detected_host = detect_wayland_display(nested_disp);
+        host_disp = detected_host;
+    }
+    if (!nested_disp || !*nested_disp) {
+        detected_nested = detect_wayland_display(host_disp);
+        nested_disp = detected_nested;
+    }
+
+    if (!host_disp || !nested_disp) {
+        fprintf(stderr, "sc7-clipboard-bridge: Unable to discover Wayland displays. Please specify --host and --nested.\n");
+        free(detected_host);
+        free(detected_nested);
+        return 1;
     }
 
     struct bridge_endpoint host, nested;

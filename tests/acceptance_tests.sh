@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-PROJECT_ROOT="/home/sc7/projects/opensource projects/sc7-rack"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE_BIN="$PROJECT_ROOT/bin/sc7-clipboard-bridge"
 SETTINGS_BIN="$PROJECT_ROOT/bin/sc7-rack-settings"
-CONFIG_DIR="$HOME/.config/sc7-rack"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sc7-rack"
 DND_DOC="$PROJECT_ROOT/docs/DND_RESEARCH.md"
 
 PASS_COUNT=0
@@ -25,14 +25,15 @@ echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-33)"
 echo "=========================================================="
 
 # Gate 1: Project location
-if [[ "$PROJECT_ROOT" == "/home/sc7/projects/opensource projects/sc7-rack" && -d "$PROJECT_ROOT" ]]; then
-    log_pass 1 "Project directory correctly located in '/home/sc7/projects/opensource projects/sc7-rack/'"
+if [[ -d "$PROJECT_ROOT" && -f "$PROJECT_ROOT/README.md" ]]; then
+    log_pass 1 "Project directory correctly located at '$PROJECT_ROOT'"
 else
     log_fail 1 "Project directory mismatch"
 fi
 
 # Gate 2: No illegal directory variants
-if [[ ! -d "/home/sc7/projects/opensource" && ! -d "/home/sc7/projects/opensource-projects" ]]; then
+PARENT_DIR="$(dirname "$PROJECT_ROOT")"
+if [[ ! -d "$PARENT_DIR/opensource" && ! -d "$PARENT_DIR/opensource-projects" ]]; then
     log_pass 2 "No illegal directory variants created"
 else
     log_fail 2 "Illegal directory variants exist"
@@ -132,12 +133,16 @@ else
 fi
 
 # Gate 14: Files path configurable
-"$SETTINGS_BIN" --files-path "/home/sc7/projects/portfolio" >/dev/null 2>&1
+PREV_FILES_PATH="$(python3 -c "import json; print(json.load(open('$CONFIG_DIR/settings.json')).get('files_path', ''))" 2>/dev/null || true)"
+"$SETTINGS_BIN" --files-path "$HOME" >/dev/null 2>&1
 F_VAL="$(python3 -c "import json; print(json.load(open('$CONFIG_DIR/settings.json')).get('files_path'))")"
-if [[ "$F_VAL" == "/home/sc7/projects/portfolio" ]]; then
-    log_pass 14 "Files path defaults to '/home/sc7/projects/portfolio' and persists"
+if [[ "$F_VAL" == "$HOME" ]]; then
+    log_pass 14 "Files path configurable and persists"
 else
     log_fail 14 "Files path setting failed"
+fi
+if [[ -n "$PREV_FILES_PATH" ]]; then
+    "$SETTINGS_BIN" --files-path "$PREV_FILES_PATH" >/dev/null 2>&1
 fi
 
 # Gate 15: Settings status display output format
@@ -186,9 +191,29 @@ else
 fi
 
 # LIVE CLIPBOARD TESTS (GATES 21-30)
-# Start bridge daemon for testing
-HOST_DISP="wayland-1"
-NESTED_DISP="wayland-2"
+HOST_DISP="${SC7_HOST_WAYLAND_DISPLAY:-${WAYLAND_DISPLAY:-}}"
+if [[ -z "$HOST_DISP" ]]; then
+    for lf in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/wayland-[0-9]*.lock; do
+        if [[ -f "$lf" ]] && fuser "$lf" >/dev/null 2>&1; then
+            HOST_DISP="$(basename "${lf%.lock}")"
+            break
+        fi
+    done
+fi
+HOST_DISP="${HOST_DISP:-wayland-0}"
+
+NESTED_DISP=""
+for lf in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/wayland-[0-9]*.lock; do
+    sock="$(basename "${lf%.lock}")"
+    if [[ "$sock" != "$HOST_DISP" ]] && fuser "$lf" >/dev/null 2>&1; then
+        NESTED_DISP="$sock"
+        break
+    fi
+done
+if [[ -z "$NESTED_DISP" ]]; then
+    NESTED_DISP="wayland-$((${HOST_DISP##*-} + 1))"
+fi
+
 pkill -f "sc7-clipboard-bridge" 2>/dev/null || true
 "$BRIDGE_BIN" --host "$HOST_DISP" --nested "$NESTED_DISP" >/dev/null 2>&1 &
 BRIDGE_PID=$!
@@ -219,24 +244,25 @@ else
 fi
 
 # Gate 23: Copy file in nested COSMIC Files -> paste in host COSMIC Files
-WAYLAND_DISPLAY="$NESTED_DISP" wl-copy -f -t text/uri-list $'file:///home/sc7/projects/portfolio/package.json\r\n' >/dev/null 2>&1 &
+TEST_FILE_URI="file://$PROJECT_ROOT/README.md"
+WAYLAND_DISPLAY="$NESTED_DISP" wl-copy -f -t text/uri-list "$TEST_FILE_URI"$'\r\n' >/dev/null 2>&1 &
 CP3_PID=$!
 sleep 0.3
 PASTE_URI_HOST="$(WAYLAND_DISPLAY="$HOST_DISP" wl-paste -n -t text/uri-list 2>/dev/null || true)"
 kill "$CP3_PID" 2>/dev/null || true
-if [[ "$PASTE_URI_HOST" == *"file:///home/sc7/projects/portfolio/package.json"* ]]; then
+if [[ "$PASTE_URI_HOST" == *"$TEST_FILE_URI"* ]]; then
     log_pass 23 "Copy file in nested COSMIC Files -> paste in host COSMIC Files works"
 else
     log_fail 23 "File copy rack -> host failed"
 fi
 
 # Gate 24: Copy file host -> paste in nested COSMIC Files
-WAYLAND_DISPLAY="$HOST_DISP" wl-copy -f -t text/uri-list $'file:///home/sc7/projects/portfolio/README.md\r\n' >/dev/null 2>&1 &
+WAYLAND_DISPLAY="$HOST_DISP" wl-copy -f -t text/uri-list "$TEST_FILE_URI"$'\r\n' >/dev/null 2>&1 &
 CP4_PID=$!
 sleep 0.3
 PASTE_URI_NESTED="$(WAYLAND_DISPLAY="$NESTED_DISP" wl-paste -n -t text/uri-list 2>/dev/null || true)"
 kill "$CP4_PID" 2>/dev/null || true
-if [[ "$PASTE_URI_NESTED" == *"file:///home/sc7/projects/portfolio/README.md"* ]]; then
+if [[ "$PASTE_URI_NESTED" == *"$TEST_FILE_URI"* ]]; then
     log_pass 24 "Copy file host -> paste in nested COSMIC Files works"
 else
     log_fail 24 "File copy host -> rack failed"

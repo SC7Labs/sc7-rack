@@ -7,7 +7,7 @@ SC7 Rack presents **one outer COSMIC window** containing a native, nested Waylan
 ```
 +-----------------------------------+-----------------------------------+
 | Top-Left: GPU Diagnostics         | Top-Right: Workspace Files        |
-| intel_gpu_top                     | COSMIC Files (~/projects/portfolio|
+| intel_gpu_top (or custom provider)| COSMIC Files ($HOME)              |
 +-----------------------------------+-----------------------------------+
 | Bottom-Left: System Monitor       | Bottom-Right: Process Monitor     |
 | COSMIC Monitor                    | htop                              |
@@ -20,7 +20,7 @@ SC7 Rack presents **one outer COSMIC window** containing a native, nested Waylan
 
 1. **Native 2x2 Tiled Grid in a Single Window**
    - The entire rack is treated as a single window by the host COSMIC compositor.
-   - Resizing, maximizing, moving workspaces, or minimizing preserves the exact 50/50 quadrant split without any position polling loops or `wdotool` hacks.
+   - Resizing, maximizing, moving workspaces, or minimizing preserves the exact 50/50 quadrant split without any position polling loops or hacks.
 2. **App-by-App Startup Experience**
    - Each tool tiles sequentially on startup with zero jitter.
 3. **Seamless Bidirectional Clipboard Bridge (`sc7-clipboard-bridge`)**
@@ -36,7 +36,8 @@ SC7 Rack presents **one outer COSMIC window** containing a native, nested Waylan
 5. **Configurable Settings & Autostart**
    - Configure start-at-login (`[x] Start SC7 Rack at login`).
    - Toggle clipboard integration (`[x] Share clipboard with desktop`).
-   - Customize default Files folder path (`~/projects/portfolio`).
+   - Customize default Files folder path (defaults to `$HOME`).
+   - Select GPU diagnostics provider (`auto`, `intel`, `nvidia`, `amd`, `custom`).
 
 ---
 
@@ -44,12 +45,12 @@ SC7 Rack presents **one outer COSMIC window** containing a native, nested Waylan
 
 ```
 Host Desktop: System76 COSMIC Desktop Environment (smithay)
-  └─ Host Wayland Socket: $WAYLAND_DISPLAY (e.g. wayland-1)
+  └─ Host Wayland Socket: $WAYLAND_DISPLAY (dynamically discovered)
        │
        ├─ SC7 Rack Outer Window (wlroots Wayland Backend)
-       │    └─ Nested Sway Compositor ($WAYLAND_DISPLAY=wayland-2)
-       │         ├─ Top-Left: intel_gpu_top (in cosmic-term)
-       │         ├─ Top-Right: cosmic-files (/home/sc7/projects/portfolio)
+       │    └─ Nested Sway Compositor ($WAYLAND_DISPLAY)
+       │         ├─ Top-Left: GPU monitor (in cosmic-term)
+       │         ├─ Top-Right: cosmic-files ($FILES_PATH, defaults to $HOME)
        │         ├─ Bottom-Left: cosmic-monitor
        │         └─ Bottom-Right: htop (in cosmic-term)
        │
@@ -87,26 +88,24 @@ A deep technical audit was conducted regarding cross-compositor Drag-and-Drop be
 
 ## Installation & Quickstart
 
-### Project Root
-This project lives at:
-```bash
-"/home/sc7/projects/opensource projects/sc7-rack"
-```
-
 ### Installation
-Run the installer script:
+Clone the repository and run the installer script:
 ```bash
-cd "/home/sc7/projects/opensource projects/sc7-rack"
+git clone https://github.com/sc7/sc7-rack.git
+cd sc7-rack
 ./scripts/install.sh
 ```
 
 This will:
-1. Build `sc7-clipboard-bridge` from clean C source.
-2. Link binaries to `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
-3. Setup Sway configuration in `~/.config/sc7-rack/`.
-4. Configure the `rack` shell alias.
+1. Check dependencies (Sway, Python 3, Tkinter).
+2. Build `sc7-clipboard-bridge` from clean C source.
+3. Link binaries to `~/.local/bin` and `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
+4. Setup Sway configuration in `~/.config/sc7-rack/`.
+5. Install FreeDesktop hicolor application icons and `.desktop` launchers for COSMIC App Library.
+6. Configure the `rack` shell alias.
 
 ### Launching SC7 Rack
+Launch via the COSMIC App Menu by clicking **SC7 Rack**, or from terminal:
 ```bash
 sc7-rack
 # or simply:
@@ -129,15 +128,17 @@ sc7-rack-settings --status
 Example Output:
 ```
 ========================================
-SC7 Rack Settings & Status
+           SC7 Rack Settings
 ========================================
-[ ] Start SC7 Rack at login
-[x] Share clipboard with desktop
-Files path: /home/sc7/projects/portfolio
+Status:             Running (PID 2133265)
+[ ] Start at login:     Disabled
+[x] Share clipboard:    Enabled
+Files path:         /home/user
+GPU Provider:       auto
 ----------------------------------------
-Clipboard bridge: Connected
-Host: COSMIC / wayland-1
-Rack: Sway / wayland-2
+Clipboard Bridge:   Connected (PID 2133295)
+Host Wayland:       $HOST_DISPLAY (host socket)
+Rack Wayland:       $RACK_DISPLAY (nested socket)
 ========================================
 ```
 
@@ -152,14 +153,33 @@ sc7-rack-settings --share-clipboard on
 sc7-rack-settings --share-clipboard off
 
 # Change default Files path
-sc7-rack-settings --files-path "/home/sc7/projects/portfolio"
+sc7-rack-settings --files-path ~/projects
+
+# Select GPU monitor provider
+sc7-rack-settings --gpu-provider intel
+sc7-rack-settings --gpu-provider auto
+sc7-rack-settings --gpu-provider custom --gpu-command "nvtop"
 ```
 
 ### GUI Dialog
-Run without arguments or with `--gui` on desktop to launch an interactive dialog:
+Launch via the COSMIC App Menu by clicking **SC7 Rack Settings**, or from terminal:
 ```bash
 sc7-rack-settings --gui
 ```
+
+---
+
+## GPU Diagnostics & Hardware Providers
+
+The top-left quadrant hosts hardware GPU diagnostics. SC7 Rack supports configurable GPU providers:
+
+| Provider | Command / Tool | Status |
+|---|---|---|
+| `auto` | Auto-detects Intel / NVIDIA / AMD | Default (recommended) |
+| `intel` | `sudo -n intel_gpu_top` | **Hardware tested & validated** (Intel Arc) |
+| `nvidia` | `nvidia-smi -l 1` or `nvtop` | Provider abstraction ready (future validation required) |
+| `amd` | `radeontop` | Provider abstraction ready (future validation required) |
+| `custom` | Configurable via `--gpu-command` | Supported |
 
 ---
 
@@ -167,7 +187,7 @@ sc7-rack-settings --gui
 
 Run the automated test suite covering all 33 acceptance criteria:
 ```bash
-cd "/home/sc7/projects/opensource projects/sc7-rack"
+cd sc7-rack
 ./tests/acceptance_tests.sh
 ```
 All 33 gates are verified automated live:

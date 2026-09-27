@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Ensure essential paths in environment
-export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
+export PATH="$XDG_BIN_HOME:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # If SC7 Rack is already running, notify user and exit cleanly
 if pgrep -f '[s]way.*sc7-rack/config' >/dev/null 2>&1; then
@@ -13,8 +14,18 @@ if pgrep -f '[s]way.*sc7-rack/config' >/dev/null 2>&1; then
     exit 0
 fi
 
-# Ensure host Wayland display is preserved for Sway and inner child processes
-HOST_DISP="${SC7_HOST_WAYLAND_DISPLAY:-${WAYLAND_DISPLAY:-wayland-1}}"
+# Ensure host Wayland display is discovered dynamically and preserved
+HOST_DISP="${SC7_HOST_WAYLAND_DISPLAY:-${WAYLAND_DISPLAY:-}}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+if [[ -z "$HOST_DISP" ]]; then
+    for lockfile in "$RUNTIME_DIR"/wayland-[0-9]*.lock; do
+        if [[ -f "$lockfile" ]] && fuser "$lockfile" >/dev/null 2>&1; then
+            HOST_DISP="$(basename "${lockfile%.lock}")"
+            break
+        fi
+    done
+fi
+HOST_DISP="${HOST_DISP:-wayland-0}"
 export SC7_HOST_WAYLAND_DISPLAY="$HOST_DISP"
 export WAYLAND_DISPLAY="$HOST_DISP"
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-COSMIC}"
@@ -22,7 +33,7 @@ export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}"
 
 # Clean up stale non-host wayland sockets/locks if previous session terminated abnormally
 shopt -s nullglob
-for lockfile in "/run/user/$UID"/wayland-[0-9]*.lock; do
+for lockfile in "$RUNTIME_DIR"/wayland-[0-9]*.lock; do
     if [[ -f "$lockfile" ]] && ! fuser "$lockfile" >/dev/null 2>&1; then
         sock="${lockfile%.lock}"
         if [[ "$(basename "$sock")" != "$HOST_DISP" ]]; then
@@ -46,14 +57,24 @@ fi
 export WLR_BACKENDS=wayland
 export WLR_LIBINPUT_NO_DEVICES=1
 
-CONFIG_FILE="$HOME/.config/sc7-rack/config"
+# Verify sway is available
+if ! command -v sway >/dev/null 2>&1; then
+    echo "Error: 'sway' is not installed or not in PATH." >&2
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "SC7 Rack" "Error: sway is not installed." --icon=dialog-error 2>/dev/null || true
+    fi
+    exit 1
+fi
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sc7-rack"
+CONFIG_FILE="$CONFIG_DIR/config"
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    mkdir -p "$HOME/.config/sc7-rack"
+    mkdir -p "$CONFIG_DIR"
     cp "$PROJECT_ROOT/config/config" "$CONFIG_FILE"
 fi
-if [[ ! -f "$HOME/.config/sc7-rack/inner.sh" ]]; then
-    cp "$PROJECT_ROOT/config/inner.sh" "$HOME/.config/sc7-rack/inner.sh"
-    chmod +x "$HOME/.config/sc7-rack/inner.sh"
+if [[ ! -f "$CONFIG_DIR/inner.sh" ]]; then
+    cp "$PROJECT_ROOT/config/inner.sh" "$CONFIG_DIR/inner.sh"
+    chmod +x "$CONFIG_DIR/inner.sh"
 fi
 
 exec sway --config "$CONFIG_FILE"

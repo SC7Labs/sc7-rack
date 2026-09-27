@@ -1,5 +1,7 @@
 {
   "autostart": false,
   "share_clipboard": true,
-  "files_path": "/home/sc7/projects/portfolio"
+  "files_path": "",
+  "gpu_provider": "auto",
+  "gpu_custom_command": ""
 }
