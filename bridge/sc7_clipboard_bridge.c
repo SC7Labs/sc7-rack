@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <wayland-client.h>
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 
@@ -40,6 +41,22 @@ static void mime_list_add(struct mime_list *l, const char *type) {
         if (strcmp(l->types[i], type) == 0) return;
     }
     l->types[l->count++] = strdup(type);
+}
+
+static bool mime_list_has(const struct mime_list *l, const char *type) {
+    for (size_t i = 0; i < l->count; i++) {
+        if (strcmp(l->types[i], type) == 0) return true;
+    }
+    return false;
+}
+
+static const char *find_matching_text_mime(const struct mime_list *l) {
+    if (mime_list_has(l, "text/plain;charset=utf-8")) return "text/plain;charset=utf-8";
+    if (mime_list_has(l, "UTF8_STRING")) return "UTF8_STRING";
+    if (mime_list_has(l, "text/plain")) return "text/plain";
+    if (mime_list_has(l, "STRING")) return "STRING";
+    if (mime_list_has(l, "TEXT")) return "TEXT";
+    return NULL;
 }
 
 struct bridge_endpoint;
@@ -89,6 +106,80 @@ static const struct zwlr_data_control_offer_v1_listener offer_listener = {
     .offer = offer_handle_offer,
 };
 
+struct uri_to_text_ctx {
+    int read_fd;
+    int write_fd;
+    bool is_uri_to_text;
+};
+
+static void *convert_worker(void *arg) {
+    struct uri_to_text_ctx *ctx = arg;
+    char buf[16384];
+    ssize_t n = 0;
+    size_t total = 0;
+    while ((n = read(ctx->read_fd, buf + total, sizeof(buf) - 1 - total)) > 0) {
+        total += n;
+        if (total >= sizeof(buf) - 1) break;
+    }
+    close(ctx->read_fd);
+    buf[total] = '\0';
+
+    if (ctx->is_uri_to_text) {
+        // Strip file:// prefix and decode %20 URL encoding
+        char *line = strtok(buf, "\r\n");
+        bool first = true;
+        while (line) {
+            while (*line == ' ') line++;
+            if (strncmp(line, "file://", 7) == 0) {
+                line += 7;
+            }
+            if (*line) {
+                char decoded[4096];
+                size_t d = 0;
+                for (size_t s = 0; line[s] && d < sizeof(decoded) - 2; s++) {
+                    if (line[s] == '%' && line[s+1] && line[s+2]) {
+                        char hex[3] = { line[s+1], line[s+2], '\0' };
+                        decoded[d++] = (char)strtol(hex, NULL, 16);
+                        s += 2;
+                    } else {
+                        decoded[d++] = line[s];
+                    }
+                }
+                decoded[d] = '\0';
+                if (!first) {
+                    ssize_t w = write(ctx->write_fd, "\n", 1);
+                    (void)w;
+                }
+                ssize_t w = write(ctx->write_fd, decoded, strlen(decoded));
+                (void)w;
+                first = false;
+            }
+            line = strtok(NULL, "\r\n");
+        }
+    } else {
+        // Plain text -> text/uri-list (file://<path>\r\n)
+        char *line = strtok(buf, "\r\n");
+        while (line) {
+            while (*line == ' ') line++;
+            if (*line == '/') {
+                char uri[4096];
+                snprintf(uri, sizeof(uri), "file://%s\r\n", line);
+                ssize_t w = write(ctx->write_fd, uri, strlen(uri));
+                (void)w;
+            } else if (strncmp(line, "file://", 7) == 0) {
+                char uri[4096];
+                snprintf(uri, sizeof(uri), "%s\r\n", line);
+                ssize_t w = write(ctx->write_fd, uri, strlen(uri));
+                (void)w;
+            }
+            line = strtok(NULL, "\r\n");
+        }
+    }
+    close(ctx->write_fd);
+    free(ctx);
+    return NULL;
+}
+
 static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *source,
                                const char *mime_type, int32_t fd) {
     struct bridge_endpoint *ep = data;
@@ -100,13 +191,86 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
                 ep->name, mime_type, fd, is_primary, (void*)peer_offer);
     }
 
-    if (peer_offer && peer_offer->offer) {
+    if (!peer_offer || !peer_offer->offer) {
+        close(fd);
+        return;
+    }
+
+    // Direct match
+    if (mime_list_has(&peer_offer->mimes, mime_type)) {
         zwlr_data_control_offer_v1_receive(peer_offer->offer, mime_type, fd);
         while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
             struct pollfd pfd = { .fd = wl_display_get_fd(ep->peer->display), .events = POLLOUT };
             poll(&pfd, 1, 100);
         }
+        close(fd);
+        return;
     }
+
+    // Target wants text/plain, but peer only has text/uri-list
+    if ((strcmp(mime_type, "text/plain") == 0 ||
+         strcmp(mime_type, "text/plain;charset=utf-8") == 0 ||
+         strcmp(mime_type, "UTF8_STRING") == 0 ||
+         strcmp(mime_type, "STRING") == 0 ||
+         strcmp(mime_type, "TEXT") == 0) &&
+        mime_list_has(&peer_offer->mimes, "text/uri-list")) {
+        int p[2];
+        if (pipe(p) == 0) {
+            struct uri_to_text_ctx *ctx = malloc(sizeof(*ctx));
+            ctx->read_fd = p[0];
+            ctx->write_fd = fd;
+            ctx->is_uri_to_text = true;
+            pthread_t th;
+            pthread_create(&th, NULL, convert_worker, ctx);
+            pthread_detach(th);
+
+            zwlr_data_control_offer_v1_receive(peer_offer->offer, "text/uri-list", p[1]);
+            while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
+                struct pollfd pfd = { .fd = wl_display_get_fd(ep->peer->display), .events = POLLOUT };
+                poll(&pfd, 1, 100);
+            }
+            close(p[1]);
+            return;
+        }
+    }
+
+    // Target wants text/uri-list, but peer only has plain text
+    if (strcmp(mime_type, "text/uri-list") == 0) {
+        const char *alt = find_matching_text_mime(&peer_offer->mimes);
+        if (alt) {
+            int p[2];
+            if (pipe(p) == 0) {
+                struct uri_to_text_ctx *ctx = malloc(sizeof(*ctx));
+                ctx->read_fd = p[0];
+                ctx->write_fd = fd;
+                ctx->is_uri_to_text = false;
+                pthread_t th;
+                pthread_create(&th, NULL, convert_worker, ctx);
+                pthread_detach(th);
+
+                zwlr_data_control_offer_v1_receive(peer_offer->offer, alt, p[1]);
+                while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
+                    struct pollfd pfd = { .fd = wl_display_get_fd(ep->peer->display), .events = POLLOUT };
+                    poll(&pfd, 1, 100);
+                }
+                close(p[1]);
+                return;
+            }
+        }
+    }
+
+    // Target wants some text form (e.g. text/plain), but peer has another text form (e.g. UTF8_STRING)
+    const char *alt_text = find_matching_text_mime(&peer_offer->mimes);
+    if (alt_text) {
+        zwlr_data_control_offer_v1_receive(peer_offer->offer, alt_text, fd);
+        while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
+            struct pollfd pfd = { .fd = wl_display_get_fd(ep->peer->display), .events = POLLOUT };
+            poll(&pfd, 1, 100);
+        }
+        close(fd);
+        return;
+    }
+
     close(fd);
 }
 
@@ -130,6 +294,40 @@ static const struct zwlr_data_control_source_v1_listener source_listener = {
     .send = source_handle_send,
     .cancelled = source_handle_cancelled,
 };
+
+static void offer_all_synthesized_mimes(struct zwlr_data_control_source_v1 *source, struct offer_info *src_offer) {
+    for (size_t i = 0; i < src_offer->mimes.count; i++) {
+        zwlr_data_control_source_v1_offer(source, src_offer->mimes.types[i]);
+    }
+
+    if (mime_list_has(&src_offer->mimes, "text/uri-list")) {
+        if (!mime_list_has(&src_offer->mimes, "text/plain;charset=utf-8")) {
+            zwlr_data_control_source_v1_offer(source, "text/plain;charset=utf-8");
+        }
+        if (!mime_list_has(&src_offer->mimes, "UTF8_STRING")) {
+            zwlr_data_control_source_v1_offer(source, "UTF8_STRING");
+        }
+        if (!mime_list_has(&src_offer->mimes, "text/plain")) {
+            zwlr_data_control_source_v1_offer(source, "text/plain");
+        }
+    }
+
+    const char *text_mime = find_matching_text_mime(&src_offer->mimes);
+    if (text_mime) {
+        if (!mime_list_has(&src_offer->mimes, "text/plain;charset=utf-8")) {
+            zwlr_data_control_source_v1_offer(source, "text/plain;charset=utf-8");
+        }
+        if (!mime_list_has(&src_offer->mimes, "UTF8_STRING")) {
+            zwlr_data_control_source_v1_offer(source, "UTF8_STRING");
+        }
+        if (!mime_list_has(&src_offer->mimes, "text/plain")) {
+            zwlr_data_control_source_v1_offer(source, "text/plain");
+        }
+        if (!mime_list_has(&src_offer->mimes, "text/uri-list")) {
+            zwlr_data_control_source_v1_offer(source, "text/uri-list");
+        }
+    }
+}
 
 static void propagate_selection(struct bridge_endpoint *src_ep, bool is_primary) {
     struct bridge_endpoint *dst_ep = src_ep->peer;
@@ -161,9 +359,7 @@ static void propagate_selection(struct bridge_endpoint *src_ep, bool is_primary)
         dst_ep->our_primary_source = source;
         zwlr_data_control_source_v1_add_listener(source, &source_listener, dst_ep);
 
-        for (size_t i = 0; i < src_offer->mimes.count; i++) {
-            zwlr_data_control_source_v1_offer(source, src_offer->mimes.types[i]);
-        }
+        offer_all_synthesized_mimes(source, src_offer);
 
         dst_ep->pending_our_primary_selections++;
         zwlr_data_control_device_v1_set_primary_selection(dst_ep->device, source);
@@ -179,9 +375,7 @@ static void propagate_selection(struct bridge_endpoint *src_ep, bool is_primary)
         dst_ep->our_source = source;
         zwlr_data_control_source_v1_add_listener(source, &source_listener, dst_ep);
 
-        for (size_t i = 0; i < src_offer->mimes.count; i++) {
-            zwlr_data_control_source_v1_offer(source, src_offer->mimes.types[i]);
-        }
+        offer_all_synthesized_mimes(source, src_offer);
 
         dst_ep->pending_our_selections++;
         zwlr_data_control_device_v1_set_selection(dst_ep->device, source);
@@ -313,26 +507,29 @@ static int connect_endpoint(struct bridge_endpoint *ep, const char *name, const 
     ep->display_name = display_name;
     ep->debug = debug;
 
-    ep->display = wl_display_connect(display_name);
-    if (!ep->display) {
-        fprintf(stderr, "[%s] Failed to connect to Wayland display '%s'\n", name, display_name ? display_name : "(default)");
-        return -1;
+    for (int attempt = 0; attempt < 30; attempt++) {
+        ep->display = wl_display_connect(display_name);
+        if (ep->display) {
+            ep->registry = wl_display_get_registry(ep->display);
+            wl_registry_add_listener(ep->registry, &registry_listener, ep);
+            wl_display_roundtrip(ep->display);
+
+            if (ep->seat && ep->manager) {
+                return 0;
+            }
+            if (ep->registry) {
+                wl_registry_destroy(ep->registry);
+                ep->registry = NULL;
+            }
+            wl_display_disconnect(ep->display);
+            ep->display = NULL;
+        }
+        usleep(100000); // 100ms
     }
 
-    ep->registry = wl_display_get_registry(ep->display);
-    wl_registry_add_listener(ep->registry, &registry_listener, ep);
-    wl_display_roundtrip(ep->display);
-
-    if (!ep->seat) {
-        fprintf(stderr, "[%s] No wl_seat found on '%s'\n", name, display_name);
-        return -1;
-    }
-    if (!ep->manager) {
-        fprintf(stderr, "[%s] zwlr_data_control_manager_v1 not supported on '%s'\n", name, display_name);
-        return -1;
-    }
-
-    return 0;
+    fprintf(stderr, "[%s] Failed to connect to Wayland display '%s' (seat=%p, manager=%p)\n",
+            name, display_name ? display_name : "(default)", (void*)ep->seat, (void*)ep->manager);
+    return -1;
 }
 
 static int setup_endpoint_device(struct bridge_endpoint *ep) {
@@ -438,10 +635,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Synchronize initial selection from host if available
-    if (host.current_offer && !host.is_our_offer) {
+    // Synchronize initial selection only if the receiving side has no active selection
+    if (host.current_offer && host.current_offer->mimes.count > 0 && !host.is_our_offer &&
+        (!nested.current_offer || nested.current_offer->mimes.count == 0)) {
         propagate_selection(&host, false);
-    } else if (nested.current_offer && !nested.is_our_offer) {
+    } else if (nested.current_offer && nested.current_offer->mimes.count > 0 && !nested.is_our_offer &&
+               (!host.current_offer || host.current_offer->mimes.count == 0)) {
         propagate_selection(&nested, false);
     }
 

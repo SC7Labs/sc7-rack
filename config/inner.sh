@@ -20,6 +20,17 @@ if [[ -f "$SETTINGS_FILE" ]]; then
     fi
 fi
 
+RACK_RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/sc7-rack"
+mkdir -p "$RACK_RUN_DIR"
+INNER_PIDS_FILE="$RACK_RUN_DIR/inner_pids"
+
+record_pid() {
+    local pid="$1"
+    if [[ -n "$pid" ]]; then
+        echo "$pid" >> "$INNER_PIDS_FILE"
+    fi
+}
+
 # Start clipboard bridge if enabled
 if [[ "$SHARE_CLIPBOARD" != "false" ]]; then
     pkill -f "sc7-clipboard-bridge" 2>/dev/null || true
@@ -47,7 +58,8 @@ if [[ "$SHARE_CLIPBOARD" != "false" ]]; then
             done
         fi
         if [[ -n "$HOST_DISP" && -n "$NESTED_DISP" ]]; then
-            "$BRIDGE_BIN" --host "$HOST_DISP" --nested "$NESTED_DISP" >/dev/null 2>&1 &
+            "$BRIDGE_BIN" --host "$HOST_DISP" --nested "$NESTED_DISP" >> "$RACK_RUN_DIR/clipboard-bridge.log" 2>&1 &
+            record_pid $!
         fi
     fi
 fi
@@ -143,17 +155,20 @@ resolve_gpu_command() {
 
 GPU_EXEC="$(resolve_gpu_command "$GPU_PROVIDER")"
 cosmic-term --no-daemon -e bash -lc "exec $GPU_EXEC" >/dev/null 2>&1 &
+record_pid $!
 wait_views 1 || true
 
 # 2) TOP RIGHT — files path
 swaymsg split h >/dev/null
 cosmic-files "$FILES_PATH" >/dev/null 2>&1 &
+record_pid $!
 wait_views 2 || true
 
 # 3) BOTTOM LEFT — COSMIC Monitor
 swaymsg focus left >/dev/null
 swaymsg split v >/dev/null
 cosmic-monitor >/dev/null 2>&1 &
+record_pid $!
 wait_views 3 || true
 
 # 4) BOTTOM RIGHT — htop
@@ -161,6 +176,7 @@ swaymsg focus up >/dev/null
 swaymsg focus right >/dev/null
 swaymsg split v >/dev/null
 cosmic-term --no-daemon -e bash -lc 'exec htop' >/dev/null 2>&1 &
+record_pid $!
 wait_views 4 || true
 
 # Explicitly normalize the row/column split percentages.

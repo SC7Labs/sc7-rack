@@ -5,9 +5,99 @@ set -euo pipefail
 XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
 export PATH="$XDG_BIN_HOME:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-# If SC7 Rack is already running, notify user and exit cleanly
-if pgrep -f '[s]way.*sc7-rack/config' >/dev/null 2>&1; then
-    echo "SC7 Rack is already running."
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+RACK_RUN_DIR="$RUNTIME_DIR/sc7-rack"
+mkdir -p "$RACK_RUN_DIR"
+PID_FILE="$RACK_RUN_DIR/sc7-rack.pid"
+INNER_PIDS_FILE="$RACK_RUN_DIR/inner_pids"
+
+# Resolve real path of this script to find the repository root even via symlinks
+REAL_BIN="$(readlink -f "$0")"
+PROJECT_ROOT="$(dirname "$(dirname "$REAL_BIN")")"
+
+get_running_rack_pid() {
+    local pid=""
+    if [[ -f "$PID_FILE" ]]; then
+        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            if grep -q "sway" "/proc/$pid/cmdline" 2>/dev/null; then
+                for sock in "$RUNTIME_DIR"/sway-ipc.*."$pid".sock; do
+                    if [[ -S "$sock" ]] && SWAYSOCK="$sock" swaymsg -t get_version >/dev/null 2>&1; then
+                        echo "$pid"
+                        return 0
+                    fi
+                done
+            fi
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    # Fallback: check any active sway process running sc7-rack config
+    for cpid in $(pgrep -f '[s]way.*sc7-rack/config' 2>/dev/null || true); do
+        if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+            if grep -q "sway" "/proc/$cpid/cmdline" 2>/dev/null; then
+                for sock in "$RUNTIME_DIR"/sway-ipc.*."$cpid".sock; do
+                    if [[ -S "$sock" ]] && SWAYSOCK="$sock" swaymsg -t get_version >/dev/null 2>&1; then
+                        echo "$cpid" > "$PID_FILE"
+                        echo "$cpid"
+                        return 0
+                    fi
+                done
+            fi
+        fi
+    done
+
+    return 1
+}
+
+# Handle command line flags
+if [[ "${1:-}" == "--status" ]]; then
+    if RUNNING_PID="$(get_running_rack_pid)"; then
+        echo "SC7 Rack is running (PID $RUNNING_PID)"
+        exit 0
+    else
+        echo "SC7 Rack is not running"
+        exit 1
+    fi
+elif [[ "${1:-}" == "--stop" ]]; then
+    if RUNNING_PID="$(get_running_rack_pid)"; then
+        echo "Stopping SC7 Rack (PID $RUNNING_PID)..."
+        kill -TERM "$RUNNING_PID" 2>/dev/null || true
+        for ((i=0; i<30; i++)); do
+            if ! kill -0 "$RUNNING_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        if kill -0 "$RUNNING_PID" 2>/dev/null; then
+            kill -KILL "$RUNNING_PID" 2>/dev/null || true
+        fi
+        # Terminate any tracked inner clients
+        if [[ -f "$INNER_PIDS_FILE" ]]; then
+            while IFS= read -r cpid; do
+                if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+                    kill -TERM "$cpid" 2>/dev/null || true
+                fi
+            done < "$INNER_PIDS_FILE"
+            rm -f "$INNER_PIDS_FILE"
+        fi
+        rm -f "$PID_FILE"
+        echo "SC7 Rack stopped."
+    else
+        echo "SC7 Rack is not running."
+    fi
+    exit 0
+elif [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: sc7-rack [--status | --stop | --help]"
+    echo "  (no args) Launch SC7 Rack workspace"
+    echo "  --status  Check if SC7 Rack is currently active"
+    echo "  --stop    Cleanly stop running SC7 Rack instances"
+    exit 0
+fi
+
+# Check if already running
+if RUNNING_PID="$(get_running_rack_pid)"; then
+    echo "SC7 Rack is already running (PID $RUNNING_PID)."
     if command -v notify-send >/dev/null 2>&1; then
         notify-send "SC7 Rack" "SC7 Rack is already running on your desktop." --icon=sc7-rack 2>/dev/null || true
     fi
@@ -16,7 +106,6 @@ fi
 
 # Ensure host Wayland display is discovered dynamically and preserved
 HOST_DISP="${SC7_HOST_WAYLAND_DISPLAY:-${WAYLAND_DISPLAY:-}}"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}"
 if [[ -z "$HOST_DISP" ]]; then
     for lockfile in "$RUNTIME_DIR"/wayland-[0-9]*.lock; do
         if [[ -f "$lockfile" ]] && fuser "$lockfile" >/dev/null 2>&1; then
@@ -42,10 +131,6 @@ for lockfile in "$RUNTIME_DIR"/wayland-[0-9]*.lock; do
     fi
 done
 shopt -u nullglob
-
-# Resolve real path of this script to find the repository root even via symlinks
-REAL_BIN="$(readlink -f "$0")"
-PROJECT_ROOT="$(dirname "$(dirname "$REAL_BIN")")"
 
 # Prepend custom wlroots library build path
 WLROOTS_BUILD="$PROJECT_ROOT/vendor/wlroots/build"
@@ -77,4 +162,51 @@ if [[ ! -f "$CONFIG_DIR/inner.sh" ]]; then
     chmod +x "$CONFIG_DIR/inner.sh"
 fi
 
-exec sway --config "$CONFIG_FILE"
+# Prepare fresh inner_pids tracking file
+> "$INNER_PIDS_FILE"
+
+cleanup() {
+    trap - EXIT INT TERM HUP
+    echo "Shutting down SC7 Rack..." >&2
+
+    # 1. Terminate tracked inner client PIDs
+    if [[ -f "$INNER_PIDS_FILE" ]]; then
+        while IFS= read -r cpid; do
+            if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+                kill -TERM "$cpid" 2>/dev/null || true
+            fi
+        done < "$INNER_PIDS_FILE"
+        sleep 0.1
+        while IFS= read -r cpid; do
+            if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+                kill -KILL "$cpid" 2>/dev/null || true
+            fi
+        done < "$INNER_PIDS_FILE"
+        rm -f "$INNER_PIDS_FILE"
+    fi
+
+    # 2. Terminate sway and its direct child tree
+    if [[ -n "${SWAY_PID:-}" ]] && kill -0 "$SWAY_PID" 2>/dev/null; then
+        pkill -P "$SWAY_PID" 2>/dev/null || true
+        kill -TERM "$SWAY_PID" 2>/dev/null || true
+        sleep 0.2
+        if kill -0 "$SWAY_PID" 2>/dev/null; then
+            kill -KILL "$SWAY_PID" 2>/dev/null || true
+        fi
+    fi
+
+    # 3. Clean up PID file and socket
+    rm -f "$PID_FILE"
+    if [[ -n "${SWAY_PID:-}" ]]; then
+        rm -f "$RUNTIME_DIR/sway-ipc."*"."$SWAY_PID".sock" 2>/dev/null || true
+    fi
+}
+
+sway --config "$CONFIG_FILE" &
+SWAY_PID=$!
+echo "$SWAY_PID" > "$PID_FILE"
+
+trap cleanup EXIT INT TERM HUP
+
+wait "$SWAY_PID" 2>/dev/null || true
+cleanup

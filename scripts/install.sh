@@ -20,19 +20,22 @@ fi
 if ! /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
     echo "Notice: Python Tkinter (python3-tk) is not installed."
     echo "The graphical settings window requires python3-tk."
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "Attempting to install python3-tk via apt..."
-        if sudo apt-get update -qq && sudo apt-get install -y python3-tk; then
-            echo "python3-tk installed successfully."
-        else
-            echo "Notice: Automatic installation of python3-tk was skipped or failed."
-            echo "Please install it manually when convenient: sudo apt install python3-tk"
-            echo "Settings can still be managed via CLI: sc7-rack-settings --status"
+    if sudo -n true 2>/dev/null && command -v apt-get >/dev/null 2>&1; then
+        echo "Attempting non-interactive install of python3-tk via apt..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq python3-tk || true
+    fi
+    if ! /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
+        echo "To use the GUI settings window, please install python3-tk:"
+        if command -v apt-get >/dev/null 2>&1; then
+            echo "  sudo apt install python3-tk"
+        elif command -v dnf >/dev/null 2>&1; then
+            echo "  sudo dnf install python3-tkinter"
+        elif command -v pacman >/dev/null 2>&1; then
+            echo "  sudo pacman -S tk"
         fi
-    elif command -v dnf >/dev/null 2>&1; then
-        echo "Please install python3-tkinter: sudo dnf install python3-tkinter"
-    elif command -v pacman >/dev/null 2>&1; then
-        echo "Please install tk: sudo pacman -S tk"
+        echo "Settings can still be managed via CLI: sc7-rack-settings --status"
+    else
+        echo "python3-tk installed successfully."
     fi
 else
     echo "Python Tkinter support: OK"
@@ -99,7 +102,7 @@ fi
 # 7. Install .desktop launchers
 cp "$SCRIPT_DIR/desktop/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack.desktop"
 cp "$SCRIPT_DIR/desktop/sc7-rack-settings.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
-chmod 644 "$XDG_DATA_HOME/applications/sc7-rack*.desktop"
+chmod 644 "$XDG_DATA_HOME/applications/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$XDG_DATA_HOME/applications" 2>/dev/null || true

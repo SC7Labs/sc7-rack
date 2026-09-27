@@ -9,7 +9,7 @@ all: $(TARGET)
 
 $(TARGET): $(SOURCES) wlr-data-control-unstable-v1-client-protocol.h
 	mkdir -p ../bin
-	$(CC) $(CFLAGS) $(SOURCES) $(WAYLAND_FLAGS) -o $(TARGET)
+	$(CC) $(CFLAGS) $(SOURCES) $(WAYLAND_FLAGS) -lpthread -o $(TARGET)
 
 protocol: wlr-data-control-unstable-v1.xml
 	wayland-scanner client-header wlr-data-control-unstable-v1.xml wlr-data-control-unstable-v1-client-protocol.h
