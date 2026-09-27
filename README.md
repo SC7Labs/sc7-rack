@@ -91,7 +91,7 @@ A deep technical audit was conducted regarding cross-compositor Drag-and-Drop be
 ### Installation
 Clone the repository and run the installer script:
 ```bash
-git clone https://github.com/sc7/sc7-rack.git
+git clone https://github.com/SC7Labs/sc7-rack.git
 cd sc7-rack
 ./scripts/install.sh
 ```
@@ -200,4 +200,4 @@ All 34 gates are verified automated live:
 - Gate 28: Large payload streaming (5MB+) without hanging.
 - Gates 29–30: Clean lifecycle termination and automatic re-establishment.
 - Gates 31–33: Drag-and-drop investigation, blocker documentation, and architecture report.
-- Gate 34: Complete COSMIC Files feature parity verification (see [`docs/COSMIC_FILES_PARITY.md`](file:///home/sc7/projects/opensource%20projects/sc7-rack/docs/COSMIC_FILES_PARITY.md)).
+- Gate 34: Complete COSMIC Files feature parity verification (see [`docs/COSMIC_FILES_PARITY.md`](docs/COSMIC_FILES_PARITY.md)).
