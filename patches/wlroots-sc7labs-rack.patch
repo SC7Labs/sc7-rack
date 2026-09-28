@@ -1,0 +1,1538 @@
+diff --git a/backend/wayland/backend.c b/backend/wayland/backend.c
+index 9f78b6f..59ffeaa 100644
+--- a/backend/wayland/backend.c
++++ b/backend/wayland/backend.c
+@@ -52,6 +52,33 @@ struct wlr_wl_backend *get_wl_backend_from_backend(struct wlr_backend *wlr_backe
+ 	return backend;
+ }
+ 
++static struct wl_list all_wl_backends;
++static bool all_wl_backends_initialized = false;
++
++struct wlr_wl_backend *wlr_wl_backend_find_by_display(struct wl_display *local_display) {
++	if (!all_wl_backends_initialized) {
++		fprintf(stderr, "[sc7-dnd] wlr_wl_backend_find_by_display: all_wl_backends not initialized!\n");
++		fflush(stderr);
++		return NULL;
++	}
++	struct wlr_wl_backend *b;
++	wl_list_for_each(b, &all_wl_backends, global_link) {
++		fprintf(stderr, "[sc7-dnd] wlr_wl_backend_find_by_display: checking backend %p (local_display=%p vs query %p)\n",
++			(void *)b, (void *)b->local_display, (void *)local_display);
++		fflush(stderr);
++		if (b->local_display == local_display) {
++			return b;
++		}
++	}
++	if (!wl_list_empty(&all_wl_backends)) {
++		b = wl_container_of(all_wl_backends.next, b, global_link);
++		fprintf(stderr, "[sc7-dnd] wlr_wl_backend_find_by_display: fallback to first backend %p\n", (void *)b);
++		fflush(stderr);
++		return b;
++	}
++	return NULL;
++}
++
+ static int dispatch_events(int fd, uint32_t mask, void *data) {
+ 	struct wlr_wl_backend *wl = data;
+ 
+@@ -405,6 +432,17 @@ static void registry_global(void *data, struct wl_registry *registry,
+ 	} else if (strcmp(iface, wp_viewporter_interface.name) == 0) {
+ 		wl->viewporter = wl_registry_bind(registry, name,
+ 			&wp_viewporter_interface, 1);
++	} else if (strcmp(iface, wl_data_device_manager_interface.name) == 0) {
++		uint32_t target_version = version < 3 ? version : 3;
++		wl->data_device_manager = wl_registry_bind(registry, name,
++			&wl_data_device_manager_interface, target_version);
++		fprintf(stderr, "[sc7-dnd] bound host wl_data_device_manager=%p, version=%u\n",
++			(void *)wl->data_device_manager, target_version);
++		fflush(stderr);
++		struct wlr_wl_seat *seat;
++		wl_list_for_each(seat, &wl->seats, link) {
++			init_seat_dnd(seat);
++		}
+ 	}
+ }
+ 
+@@ -527,6 +565,12 @@ static void backend_destroy(struct wlr_backend *backend) {
+ 	if (wl->viewporter) {
+ 		wp_viewporter_destroy(wl->viewporter);
+ 	}
++	if (wl->data_device_manager) {
++		wl_data_device_manager_destroy(wl->data_device_manager);
++	}
++	if (all_wl_backends_initialized && wl->global_link.next && wl->global_link.prev) {
++		wl_list_remove(&wl->global_link);
++	}
+ 	free(wl->drm_render_name);
+ 	free(wl->activation_token);
+ 	xdg_wm_base_destroy(wl->xdg_wm_base);
+@@ -583,6 +627,13 @@ struct wlr_backend *wlr_wl_backend_create(struct wl_display *display,
+ 	wl_list_init(&wl->outputs);
+ 	wl_list_init(&wl->seats);
+ 	wl_list_init(&wl->buffers);
++	wl_list_init(&wl->dnd_offers);
++
++	if (!all_wl_backends_initialized) {
++		wl_list_init(&all_wl_backends);
++		all_wl_backends_initialized = true;
++	}
++	wl_list_insert(&all_wl_backends, &wl->global_link);
+ 
+ 	if (remote_display != NULL) {
+ 		wl->remote_display = remote_display;
+diff --git a/backend/wayland/dnd.c b/backend/wayland/dnd.c
+new file mode 100644
+index 0000000..a451b76
+--- /dev/null
++++ b/backend/wayland/dnd.c
+@@ -0,0 +1,1012 @@
++#define _POSIX_C_SOURCE 200809L
++#define _GNU_SOURCE
++
++#include <assert.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <sys/mman.h>
++#include <pthread.h>
++#include <drm_fourcc.h>
++
++#include <wayland-client.h>
++#include <wlr/interfaces/wlr_pointer.h>
++#include <wlr/types/wlr_compositor.h>
++#include <wlr/types/wlr_buffer.h>
++#include <wlr/types/wlr_data_device.h>
++#include <wlr/types/wlr_seat.h>
++#include <wlr/render/wlr_renderer.h>
++#include <wlr/util/log.h>
++
++#include "backend/wayland.h"
++#include "render/wlr_renderer.h"
++#include "types/wlr_data_device.h"
++#include "util/time.h"
++
++struct host_data_offer {
++	struct wl_data_offer *offer;
++	struct wl_array mimes; // char*
++	uint32_t source_actions;
++	uint32_t dnd_action;
++	struct wlr_wl_backend *backend;
++	struct wl_list link; // backend->dnd_offers
++	bool in_use;
++};
++
++struct proxy_data_source {
++	struct wlr_data_source base;
++	struct host_data_offer *host_offer;
++	struct wlr_wl_backend *backend;
++};
++
++struct wlr_wl_outgoing_drag {
++	struct wlr_wl_backend *backend;
++	struct wlr_drag *wlr_drag;
++	struct wl_data_source *host_source;
++	struct wl_listener drag_destroy;
++
++	struct wlr_drag_icon *wlr_icon;
++	struct wl_listener icon_commit;
++	struct wl_listener icon_destroy;
++
++	struct wl_surface *host_icon_surface;
++	struct wl_buffer *host_icon_buffer;
++	struct wl_shm_pool *host_icon_pool;
++	int icon_width;
++	int icon_height;
++	int icon_stride;
++	size_t icon_size;
++	int icon_fd;
++	void *icon_mmap;
++
++	bool host_icon_visible;
++	int32_t icon_scale;
++	enum wl_output_transform icon_transform;
++	int32_t icon_dx;
++	int32_t icon_dy;
++};
++
++/* --- Host Offer Listener --- */
++
++static void offer_handle_offer(void *data, struct wl_data_offer *offer, const char *mime_type) {
++	struct host_data_offer *ho = data;
++	if (!ho || !mime_type) return;
++
++	char **p;
++	wl_array_for_each(p, &ho->mimes) {
++		if (strcmp(*p, mime_type) == 0) return;
++	}
++	char **entry = wl_array_add(&ho->mimes, sizeof(char *));
++	if (entry) {
++		*entry = strdup(mime_type);
++	}
++}
++
++static void offer_handle_source_actions(void *data, struct wl_data_offer *offer, uint32_t source_actions) {
++	struct host_data_offer *ho = data;
++	if (ho) ho->source_actions = source_actions;
++}
++
++static void offer_handle_action(void *data, struct wl_data_offer *offer, uint32_t dnd_action) {
++	struct host_data_offer *ho = data;
++	if (ho) ho->dnd_action = dnd_action;
++}
++
++static const struct wl_data_offer_listener offer_listener = {
++	.offer = offer_handle_offer,
++	.source_actions = offer_handle_source_actions,
++	.action = offer_handle_action,
++};
++
++static void host_data_offer_destroy(struct host_data_offer *ho) {
++	if (!ho) return;
++	wl_list_remove(&ho->link);
++	if (ho->offer) {
++		wl_data_offer_destroy(ho->offer);
++	}
++	char **p;
++	wl_array_for_each(p, &ho->mimes) {
++		free(*p);
++	}
++	wl_array_release(&ho->mimes);
++	free(ho);
++}
++
++/* --- Proxy Data Source (Host -> Nested) --- */
++
++static void proxy_source_send(struct wlr_data_source *source, const char *mime_type, int32_t fd) {
++	struct proxy_data_source *p = (struct proxy_data_source *)source;
++	if (p && p->host_offer && p->host_offer->offer) {
++		wlr_log(WLR_INFO, "[sc7-dnd] proxying drop receive request for '%s' to host", mime_type);
++		wl_data_offer_receive(p->host_offer->offer, mime_type, fd);
++		while (wl_display_flush(p->backend->remote_display) == -1 && errno == EAGAIN) {
++			struct pollfd pfd = { .fd = wl_display_get_fd(p->backend->remote_display), .events = POLLOUT };
++			poll(&pfd, 1, 100);
++		}
++	}
++	close(fd);
++}
++
++static void proxy_source_accept(struct wlr_data_source *source, uint32_t serial, const char *mime_type) {
++	struct proxy_data_source *p = (struct proxy_data_source *)source;
++	if (p && p->host_offer && p->host_offer->offer) {
++		wl_data_offer_accept(p->host_offer->offer, serial, mime_type);
++		wl_display_flush(p->backend->remote_display);
++	}
++}
++
++static void proxy_source_dnd_finish(struct wlr_data_source *source) {
++	struct proxy_data_source *p = (struct proxy_data_source *)source;
++	if (p && p->host_offer && p->host_offer->offer) {
++		if (wl_data_offer_get_version(p->host_offer->offer) >= WL_DATA_OFFER_FINISH_SINCE_VERSION) {
++			wl_data_offer_finish(p->host_offer->offer);
++			wl_display_flush(p->backend->remote_display);
++		}
++	}
++}
++
++static void proxy_source_dnd_action(struct wlr_data_source *source, enum wl_data_device_manager_dnd_action action) {
++	struct proxy_data_source *p = (struct proxy_data_source *)source;
++	if (p && p->host_offer && p->host_offer->offer) {
++		if (wl_data_offer_get_version(p->host_offer->offer) >= WL_DATA_OFFER_SET_ACTIONS_SINCE_VERSION) {
++			wl_data_offer_set_actions(p->host_offer->offer, action, action);
++			wl_display_flush(p->backend->remote_display);
++		}
++	}
++}
++
++static void proxy_source_destroy(struct wlr_data_source *source) {
++	struct proxy_data_source *p = (struct proxy_data_source *)source;
++	free(p);
++}
++
++static const struct wlr_data_source_impl proxy_source_impl = {
++	.send = proxy_source_send,
++	.accept = proxy_source_accept,
++	.destroy = proxy_source_destroy,
++	.dnd_finish = proxy_source_dnd_finish,
++	.dnd_action = proxy_source_dnd_action,
++};
++
++/* --- Real Source Drag Icon Mirroring & Forwarding Helper --- */
++
++static void set_host_icon_visible(struct wlr_wl_outgoing_drag *od, bool visible) {
++	if (!od || !od->host_icon_surface) return;
++	if (od->host_icon_visible == visible) return;
++
++	od->host_icon_visible = visible;
++	if (visible) {
++		if (od->host_icon_buffer) {
++			if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION) {
++				int32_t scale = od->icon_scale > 0 ? od->icon_scale : 1;
++				wl_surface_set_buffer_scale(od->host_icon_surface, scale);
++			}
++			if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_SET_BUFFER_TRANSFORM_SINCE_VERSION) {
++				wl_surface_set_buffer_transform(od->host_icon_surface, od->icon_transform);
++			}
++			if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_OFFSET_SINCE_VERSION) {
++				if (od->icon_dx != 0 || od->icon_dy != 0) {
++					wl_surface_offset(od->host_icon_surface, od->icon_dx, od->icon_dy);
++				}
++				wl_surface_attach(od->host_icon_surface, od->host_icon_buffer, 0, 0);
++			} else {
++				wl_surface_attach(od->host_icon_surface, od->host_icon_buffer, od->icon_dx, od->icon_dy);
++			}
++			if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION) {
++				wl_surface_damage_buffer(od->host_icon_surface, 0, 0, od->icon_width, od->icon_height);
++			} else {
++				wl_surface_damage(od->host_icon_surface, 0, 0, od->icon_width, od->icon_height);
++			}
++			wl_surface_commit(od->host_icon_surface);
++			wl_display_flush(od->backend->remote_display);
++			fprintf(stderr, "[sc7-dnd] host drag icon SHOWN outside SC7 Rack (%dx%d, scale=%d)\n",
++				od->icon_width, od->icon_height, od->icon_scale);
++			fflush(stderr);
++		}
++	} else {
++		wl_surface_attach(od->host_icon_surface, NULL, 0, 0);
++		wl_surface_commit(od->host_icon_surface);
++		wl_display_flush(od->backend->remote_display);
++		fprintf(stderr, "[sc7-dnd] host drag icon HIDDEN inside SC7 Rack\n");
++		fflush(stderr);
++	}
++}
++
++static void cleanup_outgoing_drag_icon(struct wlr_wl_outgoing_drag *od) {
++	if (!od) return;
++	od->host_icon_visible = false;
++	if (od->host_icon_surface) {
++		wl_surface_destroy(od->host_icon_surface);
++		od->host_icon_surface = NULL;
++	}
++	if (od->host_icon_buffer) {
++		wl_buffer_destroy(od->host_icon_buffer);
++		od->host_icon_buffer = NULL;
++	}
++	if (od->host_icon_pool) {
++		wl_shm_pool_destroy(od->host_icon_pool);
++		od->host_icon_pool = NULL;
++	}
++	if (od->icon_mmap && od->icon_size > 0) {
++		munmap(od->icon_mmap, od->icon_size);
++		od->icon_mmap = NULL;
++		od->icon_size = 0;
++	}
++	if (od->icon_fd >= 0) {
++		close(od->icon_fd);
++		od->icon_fd = -1;
++	}
++	od->icon_width = 0;
++	od->icon_height = 0;
++	od->icon_stride = 0;
++	if (od->backend && od->backend->remote_display) {
++		wl_display_flush(od->backend->remote_display);
++	}
++}
++
++static void mirror_wlr_surface_to_host(struct wlr_wl_outgoing_drag *od, struct wlr_surface *surface) {
++	if (!od || !od->host_icon_surface || !surface) {
++		return;
++	}
++
++	struct wlr_client_buffer *client_buffer = surface->buffer;
++	if (client_buffer == NULL) {
++		fprintf(stderr, "[sc7-dnd] mirror icon: surface has no buffer yet\n");
++		fflush(stderr);
++		return;
++	}
++
++	struct wlr_buffer *src_buffer = client_buffer->source ? client_buffer->source : &client_buffer->base;
++	int width = src_buffer->width;
++	int height = src_buffer->height;
++	if (width <= 0 || height <= 0) {
++		return;
++	}
++
++	void *src_data = NULL;
++	uint32_t src_format = 0;
++	size_t src_stride = 0;
++	void *renderer_pixels = NULL;
++	bool ok_read = false;
++
++	if (wlr_buffer_begin_data_ptr_access(src_buffer,
++			WLR_BUFFER_DATA_PTR_ACCESS_READ, &src_data, &src_format, &src_stride)) {
++		ok_read = true;
++	} else if (surface->renderer != NULL) {
++		size_t temp_size = (size_t)width * height * 4;
++		renderer_pixels = malloc(temp_size);
++		if (renderer_pixels) {
++			if (renderer_bind_buffer(surface->renderer, src_buffer)) {
++				if (wlr_renderer_read_pixels(surface->renderer, DRM_FORMAT_ARGB8888,
++						width * 4, width, height, 0, 0, 0, 0, renderer_pixels)) {
++					src_data = renderer_pixels;
++					src_format = DRM_FORMAT_ARGB8888;
++					src_stride = width * 4;
++					ok_read = true;
++				}
++				renderer_bind_buffer(surface->renderer, NULL);
++			}
++			if (!ok_read) {
++				free(renderer_pixels);
++				renderer_pixels = NULL;
++			}
++		}
++	}
++
++	if (!ok_read || !src_data) {
++		fprintf(stderr, "[sc7-dnd] mirror icon: cannot read pixels from surface buffer %p (%dx%d)\n",
++			(void *)src_buffer, width, height);
++		fflush(stderr);
++		return;
++	}
++
++	int dst_stride = width * 4;
++	size_t size = (size_t)dst_stride * height;
++
++	if (od->icon_mmap == NULL || od->icon_width != width || od->icon_height != height) {
++		if (od->host_icon_buffer) {
++			wl_buffer_destroy(od->host_icon_buffer);
++			od->host_icon_buffer = NULL;
++		}
++		if (od->host_icon_pool) {
++			wl_shm_pool_destroy(od->host_icon_pool);
++			od->host_icon_pool = NULL;
++		}
++		if (od->icon_mmap && od->icon_size > 0) {
++			munmap(od->icon_mmap, od->icon_size);
++			od->icon_mmap = NULL;
++			od->icon_size = 0;
++		}
++		if (od->icon_fd >= 0) {
++			close(od->icon_fd);
++			od->icon_fd = -1;
++		}
++
++		od->icon_fd = memfd_create("sc7-drag-icon-mirror", MFD_CLOEXEC);
++		if (od->icon_fd < 0) {
++			if (renderer_pixels) free(renderer_pixels);
++			else wlr_buffer_end_data_ptr_access(src_buffer);
++			return;
++		}
++		if (ftruncate(od->icon_fd, size) < 0) {
++			close(od->icon_fd);
++			od->icon_fd = -1;
++			if (renderer_pixels) free(renderer_pixels);
++			else wlr_buffer_end_data_ptr_access(src_buffer);
++			return;
++		}
++
++		od->icon_mmap = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, od->icon_fd, 0);
++		if (od->icon_mmap == MAP_FAILED) {
++			od->icon_mmap = NULL;
++			close(od->icon_fd);
++			od->icon_fd = -1;
++			if (renderer_pixels) free(renderer_pixels);
++			else wlr_buffer_end_data_ptr_access(src_buffer);
++			return;
++		}
++
++		od->icon_width = width;
++		od->icon_height = height;
++		od->icon_stride = dst_stride;
++		od->icon_size = size;
++
++		od->host_icon_pool = wl_shm_create_pool(od->backend->shm, od->icon_fd, size);
++		od->host_icon_buffer = wl_shm_pool_create_buffer(od->host_icon_pool, 0, width, height, dst_stride, WL_SHM_FORMAT_ARGB8888);
++	}
++
++	size_t copy_bytes = (size_t)width * 4;
++	if (copy_bytes > src_stride) copy_bytes = src_stride;
++	for (int y = 0; y < height; y++) {
++		memcpy((char *)od->icon_mmap + y * dst_stride, (const char *)src_data + y * src_stride, copy_bytes);
++	}
++
++	if (renderer_pixels) {
++		free(renderer_pixels);
++	} else {
++		wlr_buffer_end_data_ptr_access(src_buffer);
++	}
++
++	od->icon_scale = surface->current.scale > 0 ? surface->current.scale : 1;
++	od->icon_transform = surface->current.transform;
++	od->icon_dx = surface->current.dx;
++	od->icon_dy = surface->current.dy;
++
++	if (od->host_icon_visible) {
++		if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION) {
++			wl_surface_set_buffer_scale(od->host_icon_surface, od->icon_scale);
++		}
++		if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_SET_BUFFER_TRANSFORM_SINCE_VERSION) {
++			wl_surface_set_buffer_transform(od->host_icon_surface, od->icon_transform);
++		}
++		if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_OFFSET_SINCE_VERSION) {
++			if (od->icon_dx != 0 || od->icon_dy != 0) {
++				wl_surface_offset(od->host_icon_surface, od->icon_dx, od->icon_dy);
++			}
++			wl_surface_attach(od->host_icon_surface, od->host_icon_buffer, 0, 0);
++		} else {
++			wl_surface_attach(od->host_icon_surface, od->host_icon_buffer, od->icon_dx, od->icon_dy);
++		}
++		if (wl_surface_get_version(od->host_icon_surface) >= WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION) {
++			wl_surface_damage_buffer(od->host_icon_surface, 0, 0, width, height);
++		} else {
++			wl_surface_damage(od->host_icon_surface, 0, 0, surface->current.width, surface->current.height);
++		}
++
++		wl_surface_commit(od->host_icon_surface);
++		wl_display_flush(od->backend->remote_display);
++
++		fprintf(stderr, "[sc7-dnd] updated visible host drag icon (%dx%d, scale=%d, offset=%d,%d)\n",
++			width, height, od->icon_scale, od->icon_dx, od->icon_dy);
++		fflush(stderr);
++	} else {
++		fprintf(stderr, "[sc7-dnd] buffered host drag icon in memory (%dx%d, scale=%d, hidden inside rack)\n",
++			width, height, od->icon_scale);
++		fflush(stderr);
++	}
++}
++
++static void handle_drag_icon_commit(struct wl_listener *listener, void *data) {
++	struct wlr_wl_outgoing_drag *od = wl_container_of(listener, od, icon_commit);
++	if (od && od->wlr_icon && od->wlr_icon->surface) {
++		mirror_wlr_surface_to_host(od, od->wlr_icon->surface);
++	}
++}
++
++static void handle_drag_icon_destroy(struct wl_listener *listener, void *data) {
++	struct wlr_wl_outgoing_drag *od = wl_container_of(listener, od, icon_destroy);
++	if (od) {
++		fprintf(stderr, "[sc7-dnd] nested drag icon destroyed\n");
++		fflush(stderr);
++		wl_list_remove(&od->icon_commit.link);
++		wl_list_remove(&od->icon_destroy.link);
++		od->wlr_icon = NULL;
++		cleanup_outgoing_drag_icon(od);
++	}
++}
++
++struct send_forward_ctx {
++	int src_fd;
++	int dst_fd;
++	char *mime;
++};
++
++static void *send_forward_worker(void *arg) {
++	struct send_forward_ctx *ctx = arg;
++	char buf[4096];
++	ssize_t n;
++	bool logged = false;
++	size_t total = 0;
++
++	while ((n = read(ctx->src_fd, buf, sizeof(buf))) > 0) {
++		if (!logged) {
++			char preview[128] = {0};
++			size_t copy_len = n < 127 ? n : 127;
++			memcpy(preview, buf, copy_len);
++			for (size_t i = 0; i < copy_len; i++) {
++				if (preview[i] == '\r' || preview[i] == '\n') preview[i] = ' ';
++			}
++			fprintf(stderr, "[sc7-dnd] send '%s': first chunk %zd bytes: \"%s\"\n",
++				ctx->mime, n, preview);
++			fflush(stderr);
++			logged = true;
++		}
++		total += n;
++		ssize_t written = 0;
++		while (written < n) {
++			ssize_t w = write(ctx->dst_fd, buf + written, n - written);
++			if (w <= 0) break;
++			written += w;
++		}
++	}
++	if (!logged) {
++		fprintf(stderr, "[sc7-dnd] send '%s': 0 bytes transferred (EOF/closed)\n", ctx->mime);
++		fflush(stderr);
++	} else {
++		fprintf(stderr, "[sc7-dnd] send '%s': total %zu bytes transferred successfully\n", ctx->mime, total);
++		fflush(stderr);
++	}
++	close(ctx->src_fd);
++	close(ctx->dst_fd);
++	free(ctx->mime);
++	free(ctx);
++	return NULL;
++}
++
++/* --- Outgoing Source Listener (Nested -> Host) --- */
++
++static void outgoing_source_handle_target(void *data, struct wl_data_source *source, const char *mime_type) {
++	fprintf(stderr, "[sc7-dnd] outgoing target: %s\n", mime_type ? mime_type : "(null)");
++	fflush(stderr);
++	struct wlr_wl_outgoing_drag *od = data;
++	if (od && od->wlr_drag && od->wlr_drag->source) {
++		wlr_data_source_accept(od->wlr_drag->source, 0, mime_type);
++	}
++}
++
++static void outgoing_source_handle_send(void *data, struct wl_data_source *source, const char *mime_type, int32_t fd) {
++	fprintf(stderr, "[sc7-dnd] outgoing send requested: %s (host fd=%d)\n", mime_type ? mime_type : "(null)", fd);
++	fflush(stderr);
++	struct wlr_wl_outgoing_drag *od = data;
++	if (!od || !od->wlr_drag || !od->wlr_drag->source) {
++		close(fd);
++		return;
++	}
++
++	int p[2];
++	if (pipe2(p, O_CLOEXEC) < 0) {
++		wlr_data_source_send(od->wlr_drag->source, mime_type, fd);
++		return;
++	}
++
++	struct send_forward_ctx *ctx = calloc(1, sizeof(*ctx));
++	if (!ctx) {
++		close(p[0]);
++		close(p[1]);
++		wlr_data_source_send(od->wlr_drag->source, mime_type, fd);
++		return;
++	}
++
++	ctx->src_fd = p[0];
++	ctx->dst_fd = fd;
++	ctx->mime = strdup(mime_type ? mime_type : "unknown");
++
++	pthread_t th;
++	if (pthread_create(&th, NULL, send_forward_worker, ctx) != 0) {
++		close(p[0]);
++		close(p[1]);
++		free(ctx->mime);
++		free(ctx);
++		wlr_data_source_send(od->wlr_drag->source, mime_type, fd);
++		return;
++	}
++	pthread_detach(th);
++
++	wlr_data_source_send(od->wlr_drag->source, mime_type, p[1]);
++}
++
++static void outgoing_source_handle_cancelled(void *data, struct wl_data_source *source) {
++	fprintf(stderr, "[sc7-dnd] host CANCELLED outgoing drag!\n");
++	fflush(stderr);
++	struct wlr_wl_outgoing_drag *od = data;
++	if (od) {
++		if (od->wlr_icon) {
++			wl_list_remove(&od->icon_commit.link);
++			wl_list_remove(&od->icon_destroy.link);
++			od->wlr_icon = NULL;
++		}
++		cleanup_outgoing_drag_icon(od);
++		if (od->backend && od->backend->outgoing_drag == od) {
++			od->backend->outgoing_drag = NULL;
++		}
++		if (od->wlr_drag) {
++			wl_list_remove(&od->drag_destroy.link);
++			wlr_drag_destroy(od->wlr_drag);
++			od->wlr_drag = NULL;
++		}
++		wl_data_source_destroy(source);
++		free(od);
++	}
++}
++
++static void outgoing_source_handle_dnd_drop_performed(void *data, struct wl_data_source *source) {
++	fprintf(stderr, "[sc7-dnd] host outgoing DROP PERFORMED!\n");
++	fflush(stderr);
++	struct wlr_wl_outgoing_drag *od = data;
++	if (od && od->wlr_drag && od->wlr_drag->source) {
++		wlr_data_source_dnd_drop(od->wlr_drag->source);
++	}
++}
++
++static void outgoing_source_handle_dnd_finished(void *data, struct wl_data_source *source) {
++	fprintf(stderr, "[sc7-dnd] host outgoing DND FINISHED!\n");
++	fflush(stderr);
++	struct wlr_wl_outgoing_drag *od = data;
++	if (od) {
++		if (od->wlr_icon) {
++			wl_list_remove(&od->icon_commit.link);
++			wl_list_remove(&od->icon_destroy.link);
++			od->wlr_icon = NULL;
++		}
++		cleanup_outgoing_drag_icon(od);
++		if (od->backend && od->backend->outgoing_drag == od) {
++			od->backend->outgoing_drag = NULL;
++		}
++		if (od->wlr_drag) {
++			wl_list_remove(&od->drag_destroy.link);
++			if (od->wlr_drag->source) {
++				wlr_data_source_dnd_finish(od->wlr_drag->source);
++			}
++			wlr_drag_destroy(od->wlr_drag);
++			od->wlr_drag = NULL;
++		}
++		wl_data_source_destroy(source);
++		free(od);
++	}
++}
++
++static void outgoing_source_handle_action(void *data, struct wl_data_source *source, uint32_t dnd_action) {
++	fprintf(stderr, "[sc7-dnd] host outgoing action: %u\n", dnd_action);
++	fflush(stderr);
++	struct wlr_wl_outgoing_drag *od = data;
++	if (od && od->wlr_drag && od->wlr_drag->source) {
++		wlr_data_source_dnd_action(od->wlr_drag->source, dnd_action);
++	}
++}
++
++static const struct wl_data_source_listener outgoing_source_listener = {
++	.target = outgoing_source_handle_target,
++	.send = outgoing_source_handle_send,
++	.cancelled = outgoing_source_handle_cancelled,
++	.dnd_drop_performed = outgoing_source_handle_dnd_drop_performed,
++	.dnd_finished = outgoing_source_handle_dnd_finished,
++	.action = outgoing_source_handle_action,
++};
++
++static void handle_outgoing_drag_destroy(struct wl_listener *listener, void *data) {
++	struct wlr_wl_outgoing_drag *od = wl_container_of(listener, od, drag_destroy);
++	if (od) {
++		if (od->wlr_icon) {
++			wl_list_remove(&od->icon_commit.link);
++			wl_list_remove(&od->icon_destroy.link);
++			od->wlr_icon = NULL;
++		}
++		cleanup_outgoing_drag_icon(od);
++		wl_list_remove(&od->drag_destroy.link);
++		od->wlr_drag = NULL;
++		if (od->backend && od->backend->outgoing_drag == od) {
++			od->backend->outgoing_drag = NULL;
++		}
++		if (od->host_source) {
++			wl_data_source_destroy(od->host_source);
++			od->host_source = NULL;
++		}
++		free(od);
++	}
++}
++
++void wlr_wl_backend_start_parent_drag(struct wlr_wl_backend *wl, struct wlr_drag *drag) {
++	fprintf(stderr, "[sc7-dnd] wlr_wl_backend_start_parent_drag: wl=%p, drag=%p\n",
++		(void *)wl, (void *)drag);
++	fflush(stderr);
++
++	if (!wl || !wl->data_device_manager || !drag || !drag->source) {
++		fprintf(stderr, "[sc7-dnd] early return: wl=%p, ddm=%p, drag=%p, source=%p\n",
++			(void *)wl, (void *)(wl ? wl->data_device_manager : NULL),
++			(void *)drag, (void *)(drag ? drag->source : NULL));
++		fflush(stderr);
++		return;
++	}
++
++	struct wlr_wl_seat *seat = NULL;
++	struct wlr_wl_seat *s;
++	wl_list_for_each(s, &wl->seats, link) {
++		fprintf(stderr, "[sc7-dnd] checking seat %p ('%s'): dev=%p, btn_down=%d, serial=%u\n",
++			(void *)s, s->name ? s->name : "unnamed", (void *)s->wl_data_device,
++			s->button_is_down, s->last_button_serial);
++		fflush(stderr);
++		if (s->wl_data_device != NULL) {
++			if (s->button_is_down || !seat) {
++				seat = s;
++			}
++		}
++	}
++	if (!seat || !seat->wl_data_device) {
++		fprintf(stderr, "[sc7-dnd] no parent seat with data device available for drag! (seat=%p)\n", (void *)seat);
++		fflush(stderr);
++		return;
++	}
++
++	struct wlr_wl_output *output = NULL;
++	if (seat->active_pointer && seat->active_pointer->output) {
++		output = seat->active_pointer->output;
++	} else if (!wl_list_empty(&wl->outputs)) {
++		output = wl_container_of(wl->outputs.next, output, link);
++	}
++	if (!output || !output->surface) {
++		fprintf(stderr, "[sc7-dnd] no output surface for drag! (output=%p)\n", (void *)output);
++		fflush(stderr);
++		return;
++	}
++
++	if (seat->last_button_serial == 0) {
++		fprintf(stderr, "[sc7-dnd] missing button serial for start_drag!\n");
++		fflush(stderr);
++		return;
++	}
++
++	struct wlr_wl_outgoing_drag *od = calloc(1, sizeof(*od));
++	if (!od) return;
++
++	od->icon_fd = -1;
++	od->backend = wl;
++	od->wlr_drag = drag;
++	od->host_source = wl_data_device_manager_create_data_source(wl->data_device_manager);
++	if (!od->host_source) {
++		fprintf(stderr, "[sc7-dnd] failed to create host data source\n");
++		fflush(stderr);
++		free(od);
++		return;
++	}
++
++	char **mime;
++	wl_array_for_each(mime, &drag->source->mime_types) {
++		wl_data_source_offer(od->host_source, *mime);
++		fprintf(stderr, "[sc7-dnd] offering MIME to host: %s\n", *mime);
++		fflush(stderr);
++	}
++
++	uint32_t actions = drag->source->actions;
++	if (actions == 0) {
++		actions = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
++	}
++	wl_data_source_set_actions(od->host_source, actions);
++	wl_data_source_add_listener(od->host_source, &outgoing_source_listener, od);
++
++	od->drag_destroy.notify = handle_outgoing_drag_destroy;
++	wl_signal_add(&drag->events.destroy, &od->drag_destroy);
++
++	wl->outgoing_drag = od;
++
++	struct wl_surface *icon_surface = NULL;
++	if (drag->icon && drag->icon->surface && wl->compositor && wl->shm) {
++		icon_surface = wl_compositor_create_surface(wl->compositor);
++		if (icon_surface) {
++			od->host_icon_surface = icon_surface;
++			od->wlr_icon = drag->icon;
++
++			od->icon_commit.notify = handle_drag_icon_commit;
++			wl_signal_add(&drag->icon->surface->events.commit, &od->icon_commit);
++
++			od->icon_destroy.notify = handle_drag_icon_destroy;
++			wl_signal_add(&drag->icon->events.destroy, &od->icon_destroy);
++
++			mirror_wlr_surface_to_host(od, drag->icon->surface);
++
++			fprintf(stderr, "[sc7-dnd] initialized host drag icon surface=%p mirroring nested icon surface=%p\n",
++				(void *)icon_surface, (void *)drag->icon->surface);
++			fflush(stderr);
++		}
++	} else {
++		fprintf(stderr, "[sc7-dnd] start_parent_drag: drag has no icon (drag->icon=%p)\n",
++			(void *)drag->icon);
++		fflush(stderr);
++	}
++
++	fprintf(stderr, "[sc7-dnd] STARTING HOST DRAG on surface %p with serial %u (source=%p, icon=%p)\n",
++		(void *)output->surface, seat->last_button_serial, (void *)od->host_source, (void *)icon_surface);
++	fflush(stderr);
++
++	wl_data_device_start_drag(seat->wl_data_device, od->host_source,
++		output->surface, icon_surface, seat->last_button_serial);
++	wl_display_flush(wl->remote_display);
++}
++
++static void handle_pending_drag_destroy(struct wl_listener *listener, void *data) {
++	struct wlr_wl_backend *wl = wl_container_of(listener, wl, pending_drag_destroy);
++	fprintf(stderr, "[sc7-dnd] pending drag destroyed cleanly while still inside rack\n");
++	fflush(stderr);
++	wl_list_remove(&wl->pending_drag_destroy.link);
++	wl->pending_outgoing_drag = NULL;
++}
++
++void wlr_wl_backend_set_pending_drag(struct wlr_wl_backend *wl, struct wlr_drag *drag) {
++	if (!wl) return;
++	if (wl->pending_outgoing_drag != NULL) {
++		wl_list_remove(&wl->pending_drag_destroy.link);
++		wl->pending_outgoing_drag = NULL;
++	}
++	if (!drag) return;
++
++	wl->pending_outgoing_drag = drag;
++	wl->pending_drag_destroy.notify = handle_pending_drag_destroy;
++	wl_signal_add(&drag->events.destroy, &wl->pending_drag_destroy);
++
++	fprintf(stderr, "[sc7-dnd] set pending outgoing drag=%p (internal until pointer leaves rack)\n",
++		(void *)drag);
++	fflush(stderr);
++}
++
++void wlr_wl_backend_promote_pending_drag(struct wlr_wl_backend *wl) {
++	if (!wl || !wl->pending_outgoing_drag) return;
++	struct wlr_drag *drag = wl->pending_outgoing_drag;
++	wl_list_remove(&wl->pending_drag_destroy.link);
++	wl->pending_outgoing_drag = NULL;
++
++	fprintf(stderr, "[sc7-dnd] promoting pending drag %p to host compositor!\n", (void *)drag);
++	fflush(stderr);
++
++	wlr_wl_backend_start_parent_drag(wl, drag);
++	wlr_drag_set_focus(drag, NULL, 0, 0);
++}
++
++/* --- Host Data Device Listener --- */
++
++static void data_device_handle_data_offer(void *data, struct wl_data_device *dev, struct wl_data_offer *offer) {
++	struct wlr_wl_seat *seat = data;
++	if (!seat || !seat->backend) return;
++
++	fprintf(stderr, "[sc7-dnd] host data_offer received: %p\n", (void *)offer);
++	fflush(stderr);
++
++	struct host_data_offer *ho = calloc(1, sizeof(*ho));
++	if (!ho) return;
++	ho->offer = offer;
++	ho->backend = seat->backend;
++	wl_array_init(&ho->mimes);
++	wl_data_offer_add_listener(offer, &offer_listener, ho);
++	wl_list_insert(&seat->backend->dnd_offers, &ho->link);
++}
++
++static void data_device_handle_enter(void *data, struct wl_data_device *dev,
++		uint32_t serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy,
++		struct wl_data_offer *offer) {
++	struct wlr_wl_seat *seat = data;
++	if (!seat || !seat->backend) return;
++
++	fprintf(stderr, "[sc7-dnd] host data_device ENTER: surface=%p, serial=%u, offer=%p (sx=%.1f, sy=%.1f)\n",
++		(void *)surface, serial, (void *)offer, wl_fixed_to_double(sx), wl_fixed_to_double(sy));
++	fflush(stderr);
++
++	if (seat->active_pointer == NULL) {
++		struct wlr_wl_output *output = get_wl_output_from_surface(seat->backend, surface);
++		if (output) {
++			struct wlr_wl_pointer *pointer;
++			wl_list_for_each(pointer, &seat->pointers, link) {
++				if (pointer->output == output) {
++					seat->active_pointer = pointer;
++					output->cursor.pointer = pointer;
++					break;
++				}
++			}
++		}
++	}
++
++	if (seat->backend->outgoing_drag != NULL) {
++		// Our own outgoing drag moving over our window
++		fprintf(stderr, "[sc7-dnd] outgoing drag inside SC7 Rack window: hiding host icon\n");
++		fflush(stderr);
++		set_host_icon_visible(seat->backend->outgoing_drag, false);
++		if (offer && seat->backend->outgoing_drag->wlr_drag && seat->backend->outgoing_drag->wlr_drag->source) {
++			char **mime;
++			wl_array_for_each(mime, &seat->backend->outgoing_drag->wlr_drag->source->mime_types) {
++				wl_data_offer_accept(offer, serial, *mime);
++				break;
++			}
++			if (wl_data_offer_get_version(offer) >= WL_DATA_OFFER_SET_ACTIONS_SINCE_VERSION) {
++				wl_data_offer_set_actions(offer,
++					WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
++					WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
++			}
++		}
++		wlr_wl_pointer_handle_motion(seat, 0, sx, sy);
++		return;
++	}
++
++	// Incoming drag from host
++	struct host_data_offer *ho = NULL, *tmp;
++	wl_list_for_each(tmp, &seat->backend->dnd_offers, link) {
++		if (tmp->offer == offer) {
++			ho = tmp;
++			break;
++		}
++	}
++	if (!ho) {
++		fprintf(stderr, "[sc7-dnd] no matching offer found on enter for %p\n", (void *)offer);
++		fflush(stderr);
++		return;
++	}
++
++	struct wlr_seat *local_seat = wlr_seat_find_by_display(seat->backend->local_display);
++	if (!local_seat) {
++		fprintf(stderr, "[sc7-dnd] no local wlr_seat found\n");
++		fflush(stderr);
++		return;
++	}
++
++	if (local_seat->drag != NULL) {
++		fprintf(stderr, "[sc7-dnd] local seat already has active drag\n");
++		fflush(stderr);
++		return;
++	}
++
++	struct proxy_data_source *proxy = calloc(1, sizeof(*proxy));
++	if (!proxy) return;
++
++	proxy->host_offer = ho;
++	proxy->backend = seat->backend;
++	wlr_data_source_init(&proxy->base, &proxy_source_impl);
++
++	char **mime;
++	wl_array_for_each(mime, &ho->mimes) {
++		char **entry = wl_array_add(&proxy->base.mime_types, sizeof(char *));
++		if (entry) {
++			*entry = strdup(*mime);
++			fprintf(stderr, "[sc7-dnd] host -> nested proxy offering MIME: %s\n", *mime);
++			fflush(stderr);
++		}
++	}
++
++	proxy->base.actions = ho->source_actions ? ho->source_actions :
++		(WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
++
++	struct wlr_drag *drag = wlr_drag_create_synthetic(local_seat, &proxy->base);
++	if (!drag) {
++		free(proxy);
++		return;
++	}
++
++	wlr_seat_start_pointer_drag(local_seat, drag, serial);
++	seat->backend->incoming_drag = drag;
++	seat->backend->incoming_offer = ho;
++	ho->in_use = true;
++
++	wlr_wl_pointer_handle_motion(seat, 0, sx, sy);
++}
++
++static void data_device_handle_leave(void *data, struct wl_data_device *dev) {
++	struct wlr_wl_seat *seat = data;
++	if (!seat || !seat->backend) return;
++
++	fprintf(stderr, "[sc7-dnd] host data_device LEAVE\n");
++	fflush(stderr);
++
++	if (seat->backend->incoming_drag) {
++		fprintf(stderr, "[sc7-dnd] incoming drag left SC7 Rack window\n");
++		fflush(stderr);
++		wlr_drag_destroy(seat->backend->incoming_drag);
++		seat->backend->incoming_drag = NULL;
++		if (seat->backend->incoming_offer) {
++			host_data_offer_destroy(seat->backend->incoming_offer);
++			seat->backend->incoming_offer = NULL;
++		}
++	} else if (seat->backend->outgoing_drag && seat->backend->outgoing_drag->wlr_drag) {
++		fprintf(stderr, "[sc7-dnd] outgoing drag moved outside SC7 Rack window\n");
++		fflush(stderr);
++		set_host_icon_visible(seat->backend->outgoing_drag, true);
++		wlr_drag_set_focus(seat->backend->outgoing_drag->wlr_drag, NULL, 0, 0);
++	}
++}
++
++static void data_device_handle_motion(void *data, struct wl_data_device *dev,
++		uint32_t time, wl_fixed_t sx, wl_fixed_t sy) {
++	struct wlr_wl_seat *seat = data;
++	if (!seat) return;
++
++	wlr_wl_pointer_handle_motion(seat, time, sx, sy);
++}
++
++static void data_device_handle_drop(void *data, struct wl_data_device *dev) {
++	struct wlr_wl_seat *seat = data;
++	if (!seat || !seat->backend) return;
++
++	uint32_t now = (uint32_t)get_current_time_msec();
++	fprintf(stderr, "[sc7-dnd] host data_device DROP (incoming=%p, outgoing=%p)\n",
++		(void *)seat->backend->incoming_drag, (void *)seat->backend->outgoing_drag);
++	fflush(stderr);
++
++	if (seat->backend->incoming_drag) {
++		fprintf(stderr, "[sc7-dnd] drop performed inside SC7 Rack for incoming drag\n");
++		fflush(stderr);
++		struct wlr_drag *drag = seat->backend->incoming_drag;
++		seat->backend->incoming_drag = NULL;
++		seat->backend->incoming_offer = NULL;
++		wlr_drag_drop(drag, now);
++	} else if (seat->backend->outgoing_drag && seat->backend->outgoing_drag->wlr_drag) {
++		fprintf(stderr, "[sc7-dnd] drop performed inside SC7 Rack for outgoing drag\n");
++		fflush(stderr);
++		wlr_drag_drop(seat->backend->outgoing_drag->wlr_drag, now);
++	}
++}
++
++static void data_device_handle_selection(void *data, struct wl_data_device *dev,
++		struct wl_data_offer *offer) {
++	// Selection is handled out-of-band by sc7-clipboard-bridge
++}
++
++static const struct wl_data_device_listener data_device_listener = {
++	.data_offer = data_device_handle_data_offer,
++	.enter = data_device_handle_enter,
++	.leave = data_device_handle_leave,
++	.motion = data_device_handle_motion,
++	.drop = data_device_handle_drop,
++	.selection = data_device_handle_selection,
++};
++
++void init_seat_dnd(struct wlr_wl_seat *seat) {
++	fprintf(stderr, "[sc7-dnd] init_seat_dnd: seat=%p, ddm=%p, wl_seat=%p, cur_dev=%p\n",
++		(void *)seat, (void *)seat->backend->data_device_manager,
++		(void *)seat->wl_seat, (void *)seat->wl_data_device);
++	fflush(stderr);
++	if (!seat->wl_data_device && seat->backend->data_device_manager && seat->wl_seat) {
++		seat->wl_data_device = wl_data_device_manager_get_data_device(
++			seat->backend->data_device_manager, seat->wl_seat);
++		wl_data_device_add_listener(seat->wl_data_device, &data_device_listener, seat);
++		fprintf(stderr, "[sc7-dnd] initialized data device %p for seat '%s'\n",
++			(void *)seat->wl_data_device, seat->name ? seat->name : "default");
++		fflush(stderr);
++	}
++}
++
++void finish_seat_dnd(struct wlr_wl_seat *seat) {
++	if (seat->backend) {
++		struct host_data_offer *ho, *tmp;
++		wl_list_for_each_safe(ho, tmp, &seat->backend->dnd_offers, link) {
++			host_data_offer_destroy(ho);
++		}
++	}
++	if (seat->wl_data_device) {
++		if (wl_data_device_get_version(seat->wl_data_device) >= 2) {
++			wl_data_device_release(seat->wl_data_device);
++		} else {
++			wl_data_device_destroy(seat->wl_data_device);
++		}
++		seat->wl_data_device = NULL;
++	}
++}
+diff --git a/backend/wayland/meson.build b/backend/wayland/meson.build
+index 0fd528c..7e3736a 100644
+--- a/backend/wayland/meson.build
++++ b/backend/wayland/meson.build
+@@ -10,6 +10,7 @@ wlr_files += files(
+ 	'seat.c',
+ 	'pointer.c',
+ 	'tablet_v2.c',
++	'dnd.c',
+ )
+ 
+ client_protos = [
+diff --git a/backend/wayland/output.c b/backend/wayland/output.c
+index bc15084..ccfbfad 100644
+--- a/backend/wayland/output.c
++++ b/backend/wayland/output.c
+@@ -1,4 +1,5 @@
+ #include <assert.h>
++#include <signal.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -754,6 +755,7 @@ static void xdg_toplevel_handle_close(void *data,
+ 	assert(output && output->xdg_toplevel == xdg_toplevel);
+ 
+ 	wlr_output_destroy(&output->wlr_output);
++	raise(SIGTERM);
+ }
+ 
+ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
+@@ -863,9 +865,17 @@ struct wlr_output *wlr_wl_output_create(struct wlr_backend *wlr_backend) {
+ 			ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+ 	}
+ 
+-	wlr_wl_output_set_title(&output->wlr_output, NULL);
++	const char *app_title = getenv("SC7_APP_TITLE");
++	if (!app_title || !*app_title) {
++		app_title = "SC7Labs Rack";
++	}
++	wlr_wl_output_set_title(&output->wlr_output, app_title);
+ 
+-	xdg_toplevel_set_app_id(output->xdg_toplevel, "wlroots");
++	const char *app_id = getenv("SC7_APP_ID");
++	if (!app_id || !*app_id) {
++		app_id = "dev.sc7labs.rack";
++	}
++	xdg_toplevel_set_app_id(output->xdg_toplevel, app_id);
+ 	xdg_surface_add_listener(output->xdg_surface,
+ 			&xdg_surface_listener, output);
+ 	xdg_toplevel_add_listener(output->xdg_toplevel,
+@@ -916,12 +926,13 @@ void wlr_wl_output_set_title(struct wlr_output *output, const char *title) {
+ 	struct wlr_wl_output *wl_output = get_wl_output_from_output(output);
+ 	assert(wl_output->xdg_toplevel != NULL);
+ 
+-	char wl_title[32];
+ 	if (title == NULL) {
+-		if (snprintf(wl_title, sizeof(wl_title), "wlroots - %s", output->name) <= 0) {
+-			return;
++		const char *app_title = getenv("SC7_APP_TITLE");
++		if (app_title && *app_title) {
++			title = app_title;
++		} else {
++			title = "SC7Labs Rack";
+ 		}
+-		title = wl_title;
+ 	}
+ 
+ 	xdg_toplevel_set_title(wl_output->xdg_toplevel, title);
+diff --git a/backend/wayland/pointer.c b/backend/wayland/pointer.c
+index 39fb337..3e2244a 100644
+--- a/backend/wayland/pointer.c
++++ b/backend/wayland/pointer.c
+@@ -91,6 +91,7 @@ static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
+ 	}
+ 
+ 	struct wlr_output *wlr_output = &pointer->output->wlr_output;
++
+ 	struct wlr_pointer_motion_absolute_event event = {
+ 		.pointer = &pointer->wlr_pointer,
+ 		.time_msec = time,
+@@ -103,6 +104,14 @@ static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
+ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
+ 		uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
+ 	struct wlr_wl_seat *seat = data;
++	seat->last_button_serial = serial;
++	seat->last_button = button;
++	seat->button_is_down = (state == WL_POINTER_BUTTON_STATE_PRESSED);
++
++	fprintf(stderr, "[sc7-dnd] host pointer button: seat=%p ('%s'), serial=%u, button=0x%x, state=%u (down=%d)\n",
++		(void *)seat, seat->name ? seat->name : "unnamed", serial, button, state, seat->button_is_down);
++	fflush(stderr);
++
+ 	struct wlr_wl_pointer *pointer = seat->active_pointer;
+ 	if (pointer == NULL) {
+ 		return;
+@@ -117,6 +126,26 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
+ 	wl_signal_emit_mutable(&pointer->wlr_pointer.events.button, &event);
+ }
+ 
++void wlr_wl_pointer_handle_motion(struct wlr_wl_seat *seat, uint32_t time,
++		wl_fixed_t sx, wl_fixed_t sy) {
++	if (!seat) return;
++	struct wlr_wl_pointer *pointer = seat->active_pointer;
++	if (!pointer && !wl_list_empty(&seat->pointers)) {
++		pointer = wl_container_of(seat->pointers.next, pointer, link);
++		seat->active_pointer = pointer;
++	}
++	if (!pointer || !pointer->output) return;
++
++	struct wlr_output *wlr_output = &pointer->output->wlr_output;
++	struct wlr_pointer_motion_absolute_event event = {
++		.pointer = &pointer->wlr_pointer,
++		.time_msec = time,
++		.x = wl_fixed_to_double(sx) / wlr_output->width,
++		.y = wl_fixed_to_double(sy) / wlr_output->height,
++	};
++	wl_signal_emit_mutable(&pointer->wlr_pointer.events.motion_absolute, &event);
++}
++
+ static void pointer_handle_axis(void *data, struct wl_pointer *wl_pointer,
+ 		uint32_t time, uint32_t axis, wl_fixed_t value) {
+ 	struct wlr_wl_seat *seat = data;
+diff --git a/backend/wayland/seat.c b/backend/wayland/seat.c
+index d88a370..a1760dd 100644
+--- a/backend/wayland/seat.c
++++ b/backend/wayland/seat.c
+@@ -276,10 +276,17 @@ bool create_wl_seat(struct wl_seat *wl_seat, struct wlr_wl_backend *wl,
+ 	seat->global_name = global_name;
+ 	wl_list_insert(&wl->seats, &seat->link);
+ 	wl_seat_add_listener(wl_seat, &seat_listener, seat);
++
++	if (wl->data_device_manager) {
++		init_seat_dnd(seat);
++	}
++
+ 	return true;
+ }
+ 
+ void destroy_wl_seat(struct wlr_wl_seat *seat) {
++	finish_seat_dnd(seat);
++
+ 	if (seat->wl_touch) {
+ 		wl_touch_release(seat->wl_touch);
+ 		wlr_touch_finish(&seat->wlr_touch);
+diff --git a/include/backend/wayland.h b/include/backend/wayland.h
+index d6796b4..68f7f9f 100644
+--- a/include/backend/wayland.h
++++ b/include/backend/wayland.h
+@@ -50,6 +50,15 @@ struct wlr_wl_backend {
+ 	struct wl_subcompositor *subcompositor;
+ 	struct wp_viewporter *viewporter;
+ 	char *drm_render_name;
++
++	struct wl_list global_link; // all_wl_backends
++	struct wl_data_device_manager *data_device_manager;
++	struct wl_list dnd_offers; // host_data_offer.link
++	struct wlr_wl_outgoing_drag *outgoing_drag;
++	struct wlr_drag *incoming_drag;
++	void *incoming_offer;
++	struct wlr_drag *pending_outgoing_drag;
++	struct wl_listener pending_drag_destroy;
+ };
+ 
+ struct wlr_wl_buffer {
+@@ -151,6 +160,11 @@ struct wlr_wl_seat {
+ 	struct zwp_tablet_pad_v2 *zwp_tablet_pad_v2;
+ 	struct wlr_tablet_pad wlr_tablet_pad;
+ 
++	struct wl_data_device *wl_data_device;
++	uint32_t last_button_serial;
++	uint32_t last_button;
++	bool button_is_down;
++
+ 	struct wl_list link; // wlr_wl_backend.seats
+ };
+ 
+@@ -170,6 +184,15 @@ void init_seat_touch(struct wlr_wl_seat *seat);
+ void init_seat_tablet(struct wlr_wl_seat *seat);
+ void finish_seat_tablet(struct wlr_wl_seat *seat);
+ 
++void init_seat_dnd(struct wlr_wl_seat *seat);
++void finish_seat_dnd(struct wlr_wl_seat *seat);
++void wlr_wl_backend_start_parent_drag(struct wlr_wl_backend *wl, struct wlr_drag *drag);
++void wlr_wl_backend_set_pending_drag(struct wlr_wl_backend *wl, struct wlr_drag *drag);
++void wlr_wl_backend_promote_pending_drag(struct wlr_wl_backend *wl);
++struct wlr_wl_backend *wlr_wl_backend_find_by_display(struct wl_display *local_display);
++void wlr_wl_pointer_handle_motion(struct wlr_wl_seat *seat, uint32_t time,
++	wl_fixed_t sx, wl_fixed_t sy);
++
+ bool create_wl_seat(struct wl_seat *wl_seat, struct wlr_wl_backend *wl,
+ 	uint32_t global_name);
+ void destroy_wl_seat(struct wlr_wl_seat *seat);
+diff --git a/include/types/wlr_data_device.h b/include/types/wlr_data_device.h
+index 99aff42..dab42f3 100644
+--- a/include/types/wlr_data_device.h
++++ b/include/types/wlr_data_device.h
+@@ -40,4 +40,11 @@ struct wlr_seat_client *seat_client_from_data_device_resource(
+  */
+ void seat_client_send_selection(struct wlr_seat_client *seat_client);
+ 
++struct wlr_drag *wlr_drag_create_synthetic(struct wlr_seat *seat,
++	struct wlr_data_source *source);
++void wlr_drag_drop(struct wlr_drag *drag, uint32_t time);
++void wlr_drag_destroy(struct wlr_drag *drag);
++void wlr_drag_set_focus(struct wlr_drag *drag, struct wlr_surface *surface,
++	double sx, double sy);
++
+ #endif
+diff --git a/include/wlr/types/wlr_seat.h b/include/wlr/types/wlr_seat.h
+index 70cc078..c594e97 100644
+--- a/include/wlr/types/wlr_seat.h
++++ b/include/wlr/types/wlr_seat.h
+@@ -297,8 +297,11 @@ struct wlr_seat {
+ 	} events;
+ 
+ 	void *data;
++	struct wl_list link_all;
+ };
+ 
++struct wlr_seat *wlr_seat_find_by_display(struct wl_display *display);
++
+ struct wlr_seat_pointer_request_set_cursor_event {
+ 	struct wlr_seat_client *seat_client;
+ 	struct wlr_surface *surface;
+diff --git a/types/data_device/wlr_drag.c b/types/data_device/wlr_drag.c
+index c6e9e59..4efa7fd 100644
+--- a/types/data_device/wlr_drag.c
++++ b/types/data_device/wlr_drag.c
+@@ -9,6 +9,7 @@
+ #include <wlr/types/wlr_seat.h>
+ #include <wlr/util/log.h>
+ #include "types/wlr_data_device.h"
++#include "backend/wayland.h"
+ 
+ static void drag_handle_seat_client_destroy(struct wl_listener *listener,
+ 		void *data) {
+@@ -213,10 +214,9 @@ static uint32_t drag_handle_pointer_button(struct wlr_seat_pointer_grab *grab,
+ 	struct wlr_drag *drag = grab->data;
+ 
+ 	if (drag->source &&
+-			grab->seat->pointer_state.grab_button == button &&
++			(grab->seat->pointer_state.grab_button == button || grab->seat->pointer_state.grab_button == 0) &&
+ 			state == WL_POINTER_BUTTON_STATE_RELEASED) {
+-		if (drag->focus_client && drag->source->current_dnd_action &&
+-				drag->source->accepted) {
++		if (drag->focus_client && (drag->source->current_dnd_action || drag->source->accepted)) {
+ 			drag_drop(drag, time);
+ 		} else if (drag->source->impl->dnd_finish) {
+ 			// This will end the grab and free `drag`
+@@ -442,6 +442,59 @@ struct wlr_drag *wlr_drag_create(struct wlr_seat_client *seat_client,
+ 	return drag;
+ }
+ 
++struct wlr_drag *wlr_drag_create_synthetic(struct wlr_seat *seat,
++		struct wlr_data_source *source) {
++	struct wlr_drag *drag = calloc(1, sizeof(*drag));
++	if (drag == NULL) {
++		return NULL;
++	}
++
++	wl_signal_init(&drag->events.focus);
++	wl_signal_init(&drag->events.motion);
++	wl_signal_init(&drag->events.drop);
++	wl_signal_init(&drag->events.destroy);
++
++	drag->seat = seat;
++	drag->seat_client = NULL;
++
++	drag->source = source;
++	if (source != NULL) {
++		drag->source_destroy.notify = drag_handle_drag_source_destroy;
++		wl_signal_add(&source->events.destroy, &drag->source_destroy);
++	}
++
++	drag->pointer_grab.data = drag;
++	drag->pointer_grab.interface = &data_device_pointer_drag_interface;
++
++	drag->touch_grab.data = drag;
++	drag->touch_grab.interface = &data_device_touch_drag_interface;
++
++	drag->keyboard_grab.data = drag;
++	drag->keyboard_grab.interface = &data_device_keyboard_drag_interface;
++
++	return drag;
++}
++
++void wlr_drag_drop(struct wlr_drag *drag, uint32_t time) {
++	if (drag && drag->focus_client) {
++		drag_drop(drag, time);
++	} else if (drag) {
++		drag_destroy(drag);
++	}
++}
++
++void wlr_drag_destroy(struct wlr_drag *drag) {
++	if (drag) {
++		drag_destroy(drag);
++	}
++}
++
++void wlr_drag_set_focus(struct wlr_drag *drag, struct wlr_surface *surface, double sx, double sy) {
++	if (drag) {
++		drag_set_focus(drag, surface, sx, sy);
++	}
++}
++
+ void wlr_seat_request_start_drag(struct wlr_seat *seat, struct wlr_drag *drag,
+ 		struct wlr_surface *origin, uint32_t serial) {
+ 	assert(drag->seat == seat);
+@@ -493,12 +546,29 @@ void wlr_seat_start_drag(struct wlr_seat *seat, struct wlr_drag *drag,
+ 
+ void wlr_seat_start_pointer_drag(struct wlr_seat *seat, struct wlr_drag *drag,
+ 		uint32_t serial) {
++	fprintf(stderr, "[sc7-dnd] wlr_seat_start_pointer_drag: seat=%p, drag=%p, seat_client=%p, serial=%u\n",
++		(void *)seat, (void *)drag, (void *)(drag ? drag->seat_client : NULL), serial);
++	fflush(stderr);
++
+ 	drag->grab_type = WLR_DRAG_GRAB_KEYBOARD_POINTER;
+ 
+ 	wlr_seat_pointer_clear_focus(seat);
+ 	wlr_seat_pointer_start_grab(seat, &drag->pointer_grab);
+ 
+ 	wlr_seat_start_drag(seat, drag, serial);
++
++	if (drag->seat_client != NULL) {
++		struct wlr_wl_backend *wl = wlr_wl_backend_find_by_display(seat->display);
++		fprintf(stderr, "[sc7-dnd] wlr_seat_start_pointer_drag: found wl backend=%p (display=%p)\n",
++			(void *)wl, (void *)seat->display);
++		fflush(stderr);
++		if (wl) {
++			wlr_wl_backend_start_parent_drag(wl, drag);
++		}
++	} else {
++		fprintf(stderr, "[sc7-dnd] wlr_seat_start_pointer_drag: seat_client is NULL (synthetic drag)\n");
++		fflush(stderr);
++	}
+ }
+ 
+ void wlr_seat_start_touch_drag(struct wlr_seat *seat, struct wlr_drag *drag,
+diff --git a/types/seat/wlr_seat.c b/types/seat/wlr_seat.c
+index 9e91c9b..a548a88 100644
+--- a/types/seat/wlr_seat.c
++++ b/types/seat/wlr_seat.c
+@@ -211,11 +211,31 @@ static void seat_handle_bind(struct wl_client *client, void *_wlr_seat,
+ 	wl_seat_send_capabilities(wl_resource, wlr_seat->capabilities);
+ }
+ 
++static struct wl_list all_wlr_seats;
++static bool all_wlr_seats_initialized = false;
++
++struct wlr_seat *wlr_seat_find_by_display(struct wl_display *display) {
++	if (!all_wlr_seats_initialized || !display) {
++		return NULL;
++	}
++	struct wlr_seat *seat;
++	wl_list_for_each(seat, &all_wlr_seats, link_all) {
++		if (seat->display == display) {
++			return seat;
++		}
++	}
++	return NULL;
++}
++
+ void wlr_seat_destroy(struct wlr_seat *seat) {
+ 	if (!seat) {
+ 		return;
+ 	}
+ 
++	if (all_wlr_seats_initialized && seat->link_all.next && seat->link_all.prev) {
++		wl_list_remove(&seat->link_all);
++	}
++
+ 	wlr_seat_pointer_clear_focus(seat);
+ 	wlr_seat_keyboard_clear_focus(seat);
+ 
+@@ -346,6 +366,12 @@ struct wlr_seat *wlr_seat_create(struct wl_display *display, const char *name) {
+ 	seat->display_destroy.notify = handle_display_destroy;
+ 	wl_display_add_destroy_listener(display, &seat->display_destroy);
+ 
++	if (!all_wlr_seats_initialized) {
++		wl_list_init(&all_wlr_seats);
++		all_wlr_seats_initialized = true;
++	}
++	wl_list_insert(&all_wlr_seats, &seat->link_all);
++
+ 	return seat;
+ }
+ 
+diff --git a/util/meson.build b/util/meson.build
+index 1c3dcd5..d176b79 100644
+--- a/util/meson.build
++++ b/util/meson.build
+@@ -11,5 +11,6 @@ wlr_files += files(
+ 	'shm.c',
+ 	'time.c',
+ 	'token.c',
++	'stubs.c',
+ )
+ 
+diff --git a/util/stubs.c b/util/stubs.c
+new file mode 100644
+index 0000000..9feb83b
+--- /dev/null
++++ b/util/stubs.c
+@@ -0,0 +1,32 @@
++#pragma GCC diagnostic ignored "-Wmissing-prototypes"
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++
++bool wlr_backend_is_x11(void *b) { (void)b; return false; }
++void *wlr_drm_connector_add_mode(void *c, const void *m) { (void)c; (void)m; return NULL; }
++int wlr_drm_connector_get_panel_orientation(void *c) { (void)c; return 0; }
++void wlr_drm_lease_request_v1_grant(void *r) { (void)r; }
++void wlr_drm_lease_request_v1_reject(void *r) { (void)r; }
++void *wlr_drm_lease_v1_manager_create(void *d, void *b) { (void)d; (void)b; return NULL; }
++bool wlr_drm_lease_v1_manager_offer_output(void *m, void *o) { (void)m; (void)o; return false; }
++bool wlr_input_device_is_libinput(void *d) { (void)d; return false; }
++void *wlr_libinput_get_device_handle(void *d) { (void)d; return NULL; }
++bool wlr_output_is_drm(void *o) { (void)o; return false; }
++bool wlr_session_change_vt(void *s, unsigned int vt) { (void)s; (void)vt; return false; }
++void *wlr_x11_output_create(void *b) { (void)b; return NULL; }
++void *wlr_xwayland_create(void *d, void *c, bool l) { (void)d; (void)c; (void)l; return NULL; }
++void wlr_xwayland_destroy(void *x) { (void)x; }
++int wlr_xwayland_icccm_input_model(void *s) { (void)s; return 0; }
++bool wlr_xwayland_or_surface_wants_focus(void *s) { (void)s; return false; }
++void wlr_xwayland_set_cursor(void *x, const void *c, uint32_t s, int hx, int hy) { (void)x; (void)c; (void)s; (void)hx; (void)hy; }
++void wlr_xwayland_set_seat(void *x, void *s) { (void)x; (void)s; }
++void wlr_xwayland_surface_activate(void *s, bool a) { (void)s; (void)a; }
++void wlr_xwayland_surface_close(void *s) { (void)s; }
++void wlr_xwayland_surface_configure(void *s, int16_t x, int16_t y, uint16_t w, uint16_t h) { (void)s; (void)x; (void)y; (void)w; (void)h; }
++void wlr_xwayland_surface_restack(void *s, void *b, int m) { (void)s; (void)b; (void)m; }
++void wlr_xwayland_surface_set_fullscreen(void *s, bool f) { (void)s; (void)f; }
++void wlr_xwayland_surface_set_maximized(void *s, bool m) { (void)s; (void)m; }
++void wlr_xwayland_surface_set_minimized(void *s, bool m) { (void)s; (void)m; }
++void *wlr_xwayland_surface_try_from_wlr_surface(void *s) { (void)s; return NULL; }

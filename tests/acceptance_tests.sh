@@ -21,7 +21,7 @@ log_fail() {
 }
 
 echo "=========================================================="
-echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-34)"
+echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-40)"
 echo "=========================================================="
 
 # Gate 1: Project location
@@ -60,18 +60,31 @@ else
     log_pass 5 "Sudoers rule checked (configured or password-protected)"
 fi
 
-# Gate 6: Required dependencies installed
-ALL_DEPS=true
-for c in sway cosmic-term cosmic-files cosmic-monitor htop intel_gpu_top wl-copy wl-paste; do
+# Gate 6: Mandatory runtime dependencies installed
+# GPU monitoring tools and clipboard test tools are optional.
+MANDATORY_DEPS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3)
+OPTIONAL_DEPS=(intel_gpu_top nvidia-smi nvtop radeontop wl-copy wl-paste)
+MISSING_MANDATORY=()
+MISSING_OPTIONAL=()
+
+for c in "${MANDATORY_DEPS[@]}"; do
     if ! command -v "$c" >/dev/null 2>&1; then
-        ALL_DEPS=false
-        break
+        MISSING_MANDATORY+=("$c")
     fi
 done
-if [[ "$ALL_DEPS" == "true" ]]; then
-    log_pass 6 "All system dependencies present"
+for c in "${OPTIONAL_DEPS[@]}"; do
+    if ! command -v "$c" >/dev/null 2>&1; then
+        MISSING_OPTIONAL+=("$c")
+    fi
+done
+
+if [[ ${#MISSING_MANDATORY[@]} -eq 0 ]]; then
+    log_pass 6 "All mandatory runtime dependencies present"
 else
-    log_fail 6 "Missing required system dependency"
+    log_fail 6 "Missing mandatory runtime dependencies: ${MISSING_MANDATORY[*]}"
+fi
+if [[ ${#MISSING_OPTIONAL[@]} -gt 0 ]]; then
+    echo "  [INFO] Gate 6: Optional tools not found (non-blocking): ${MISSING_OPTIONAL[*]}"
 fi
 
 # Gate 7: Host WAYLAND_DISPLAY preserved in launcher
@@ -367,6 +380,93 @@ if bash "$PROJECT_ROOT/tests/cosmic_files_parity_tests.sh" >/dev/null 2>&1; then
     log_pass 34 "COSMIC Files feature parity automated gates all pass"
 else
     log_fail 34 "COSMIC Files feature parity automated gates failed"
+fi
+
+# ── Source Reproducibility Gates (35-40) ─────────────────────────────────────
+
+PATCH_FILE="$PROJECT_ROOT/patches/wlroots-sc7labs-rack.patch"
+BASE_REV_FILE="$PROJECT_ROOT/patches/WLROOTS_BASE_REVISION"
+BOOTSTRAP_SCRIPT="$PROJECT_ROOT/scripts/bootstrap-wlroots.sh"
+LAUNCHER="$PROJECT_ROOT/bin/sc7-rack"
+WLROOTS_BUILD="$PROJECT_ROOT/vendor/wlroots/build/libwlroots.so.12"
+EXPECTED_SHA="a2d2c38a3127745629293066beeed0a649dff8de"
+
+# Gate 35: Pinned wlroots base revision file exists with correct SHA
+if [[ -f "$BASE_REV_FILE" ]]; then
+    ACTUAL_SHA="$(tr -d '[:space:]' < "$BASE_REV_FILE")"
+    if [[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]]; then
+        log_pass 35 "Pinned wlroots base revision correct ($ACTUAL_SHA)"
+    else
+        log_fail 35 "WLROOTS_BASE_REVISION SHA mismatch: got '$ACTUAL_SHA', want '$EXPECTED_SHA'"
+    fi
+else
+    log_fail 35 "patches/WLROOTS_BASE_REVISION is missing"
+fi
+
+# Gate 36: Tracked SC7Labs wlroots patch exists
+if [[ -f "$PATCH_FILE" ]]; then
+    PATCH_LINES="$(wc -l < "$PATCH_FILE")"
+    if [[ "$PATCH_LINES" -gt 100 ]]; then
+        log_pass 36 "SC7Labs wlroots patch present ($PATCH_LINES lines)"
+    else
+        log_fail 36 "patches/wlroots-sc7labs-rack.patch is suspiciously short ($PATCH_LINES lines)"
+    fi
+else
+    log_fail 36 "patches/wlroots-sc7labs-rack.patch is missing"
+fi
+
+# Gate 37: Bootstrap script exists and is executable
+if [[ -f "$BOOTSTRAP_SCRIPT" && -x "$BOOTSTRAP_SCRIPT" ]]; then
+    log_pass 37 "scripts/bootstrap-wlroots.sh exists and is executable"
+else
+    log_fail 37 "scripts/bootstrap-wlroots.sh missing or not executable"
+fi
+
+# Gate 38: Patch contains expected DnD implementation markers
+if [[ -f "$PATCH_FILE" ]]; then
+    MARKERS_OK=true
+    for marker in \
+        "wl_data_device_manager" \
+        "dnd_drop_performed" \
+        "dnd_finished" \
+        "wlr_drag_icon" \
+        "wlr_wl_backend_find_by_display" \
+        "backend/wayland/dnd.c"
+    do
+        if ! grep -q "$marker" "$PATCH_FILE"; then
+            log_fail 38 "Patch missing expected DnD marker: '$marker'"
+            MARKERS_OK=false
+            break
+        fi
+    done
+    if [[ "$MARKERS_OK" == "true" ]]; then
+        log_pass 38 "SC7Labs DnD patch contains all expected implementation markers"
+    fi
+else
+    log_fail 38 "Cannot check DnD markers — patch file missing"
+fi
+
+# Gate 39: Launcher prepends local SC7 wlroots build to LD_LIBRARY_PATH
+if [[ -f "$LAUNCHER" ]]; then
+    if grep -q "vendor/wlroots/build" "$LAUNCHER" && grep -q "LD_LIBRARY_PATH" "$LAUNCHER"; then
+        log_pass 39 "Launcher prepends vendor/wlroots/build to LD_LIBRARY_PATH"
+    else
+        log_fail 39 "Launcher does not reference local SC7 wlroots build path"
+    fi
+else
+    log_fail 39 "Launcher bin/sc7-rack not found"
+fi
+
+# Gate 40: Patched wlroots library is built and available (no system fallback needed)
+if [[ -f "$WLROOTS_BUILD" ]]; then
+    LIB_SIZE="$(stat -c%s "$WLROOTS_BUILD" 2>/dev/null || echo 0)"
+    if [[ "$LIB_SIZE" -gt 100000 ]]; then
+        log_pass 40 "Patched wlroots library built and present (${LIB_SIZE} bytes)"
+    else
+        log_fail 40 "vendor/wlroots/build/libwlroots.so.12 is unexpectedly small ($LIB_SIZE bytes)"
+    fi
+else
+    log_fail 40 "vendor/wlroots/build/libwlroots.so.12 not found — run scripts/bootstrap-wlroots.sh"
 fi
 
 echo "=========================================================="
