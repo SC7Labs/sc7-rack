@@ -18,9 +18,20 @@ The reference oracle is stock host COSMIC Files. SC7Labs Rack does not fork or p
 | `XDG_SESSION_TYPE` | `wayland` | `wayland` | **Identical** | Pure Wayland backend |
 | `XDG_RUNTIME_DIR` | `/run/user/1000` | `/run/user/1000` | **Identical** | Shared runtime sockets & locks |
 | `XDG_DATA_DIRS` | Shared system/flatpak | Shared system/flatpak | **Identical** | Complete application .desktop catalog |
-| `WAYLAND_DISPLAY` | `wayland-1` (or dynamic) | `wayland-2` (nested Sway) | **Isolated Display** | Necessary for rack compositing and 2x2 layout |
-| `SC7_HOST_WAYLAND_DISPLAY`| N/A | `wayland-1` (or dynamic) | **Preserved Bridge** | Allows apps requiring host access to target host |
+| `WAYLAND_DISPLAY` | `wayland-1` (or dynamic) | `wayland-1` (or dynamic) | **Identical** | Applications launched by Files inherit the host display |
+| `WAYLAND_SOCKET` | Normally unset | Connected socket to nested Sway during Files startup | **Isolated Connection** | COSMIC Files itself remains in the rack; its Wayland client consumes this variable before launching applications |
 | `HOME` | `/home/sc7` | `/home/sc7` | **Identical** | Preserves user profile, trash, and settings |
+
+---
+
+COSMIC Files executes configured MIME applications directly. Its Rack launcher
+connects Files to the nested compositor through `WAYLAND_SOCKET` while restoring
+the host session environment. Thus a double-click opens the associated app on
+the host desktop, including associations such as COSMIC Text for `.txt` and
+`.md`. Files continues to navigate directories and handle drag and drop through
+its nested Wayland connection. New Files windows also open on the host desktop;
+the resident Files window remains in Rack. The Rack-private `xdg-open` bridge
+still handles other nested programs that invoke `xdg-open`.
 
 ---
 

@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Keep COSMIC Files in Rack while its launched applications use the host."""
+
+import os
+import shutil
+import socket
+import sys
+
+
+HOST_VARS = (
+    "DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SWAYSOCK",
+    "I3SOCK",
+    "LD_LIBRARY_PATH",
+    "WLR_BACKENDS",
+    "WLR_LIBINPUT_NO_DEVICES",
+)
+
+
+def main() -> int:
+    nested_display = os.environ.get("WAYLAND_DISPLAY")
+    host_display = os.environ.get("SC7_HOST_WAYLAND_DISPLAY")
+    host_path = os.environ.get("SC7_HOST_PATH")
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not all((nested_display, host_display, host_path, runtime_dir)):
+        print("sc7-rack-files: host or nested Wayland session is unavailable", file=sys.stderr)
+        return 1
+    if nested_display == host_display:
+        print("sc7-rack-files: nested Wayland display was not selected", file=sys.stderr)
+        return 1
+    files_binary = shutil.which("cosmic-files")
+    if files_binary is None:
+        print("sc7-rack-files: cosmic-files is unavailable", file=sys.stderr)
+        return 1
+
+    # winit/wayland-client consumes WAYLAND_SOCKET for Files' own connection,
+    # then removes it and marks the socket close-on-exec. Applications that
+    # Files launches directly therefore use WAYLAND_DISPLAY from the host.
+    nested_socket = (
+        nested_display if os.path.isabs(nested_display)
+        else os.path.join(runtime_dir, nested_display)
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(nested_socket)
+        connection.set_inheritable(True)
+
+        env = os.environ.copy()
+        env["WAYLAND_DISPLAY"] = host_display
+        env["PATH"] = host_path
+        for name in HOST_VARS:
+            saved = f"SC7_HOST_{name}"
+            if env.get(f"{saved}_SET") == "x":
+                env[name] = env.get(saved, "")
+            else:
+                env.pop(name, None)
+        for name in tuple(env):
+            if name.startswith("SC7_HOST_"):
+                env.pop(name)
+        for name in (
+            "SC7_RACK_PRIVATE_BIN", "SC7_APP_ID", "SC7_APP_TITLE",
+            "XDG_ACTIVATION_TOKEN",
+        ):
+            env.pop(name, None)
+        env["WAYLAND_SOCKET"] = str(connection.fileno())
+        os.execve(files_binary, ["cosmic-files", *sys.argv[1:]], env)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(f"sc7-rack-files: {error}", file=sys.stderr)
+        raise SystemExit(1)

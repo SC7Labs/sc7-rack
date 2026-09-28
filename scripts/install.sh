@@ -283,6 +283,7 @@ for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
     ln -sf "$SCRIPT_DIR/bin/sc7-rack-settings" "$bindir/sc7-rack-settings"
     ln -sf "$SCRIPT_DIR/bin/sc7-clipboard-bridge" "$bindir/sc7-clipboard-bridge"
     ln -sf "$SCRIPT_DIR/bin/sc7-rack-open-host" "$bindir/sc7-rack-open-host"
+    ln -sf "$SCRIPT_DIR/bin/sc7-rack-files" "$bindir/sc7-rack-files"
     # Create 'rack' symlink pointing to sc7-rack
     ln -sf "$SCRIPT_DIR/bin/sc7-rack" "$bindir/rack"
 done
@@ -331,7 +332,7 @@ done
 
 echo ""
 echo "── Post-install runtime validation ──"
-VALIDATION_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop xdg-open sc7-rack sc7-rack-settings sc7-rack-open-host)
+VALIDATION_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop xdg-open sc7-rack sc7-rack-settings sc7-rack-open-host sc7-rack-files)
 VALIDATION_FAILED=false
 
 # Ensure newly installed symlinks are findable

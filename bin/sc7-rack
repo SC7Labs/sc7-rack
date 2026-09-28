@@ -154,7 +154,8 @@ if [[ -z "$HOST_XDG_OPEN" || ! -x "$HOST_XDG_OPEN" ]]; then
 fi
 export SC7_HOST_XDG_OPEN="$(readlink -f -- "$HOST_XDG_OPEN")"
 export SC7_RACK_PRIVATE_BIN="$PROJECT_ROOT/bin/rack-private"
-if [[ ! -x "$SC7_RACK_PRIVATE_BIN/xdg-open" || ! -x "$PROJECT_ROOT/bin/sc7-rack-open-host" ]]; then
+if [[ ! -x "$SC7_RACK_PRIVATE_BIN/xdg-open" || ! -x "$PROJECT_ROOT/bin/sc7-rack-open-host" ||
+      ! -x "$PROJECT_ROOT/bin/sc7-rack-files" ]]; then
     echo "Error: Rack host-open bridge is missing or not executable." >&2
     exit 1
 fi
@@ -201,8 +202,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     mkdir -p "$CONFIG_DIR"
     cp "$PROJECT_ROOT/config/config" "$CONFIG_FILE"
 fi
-# Refresh older installed launch scripts that predate the private opener.
-if [[ ! -f "$CONFIG_DIR/inner.sh" ]] || ! grep -q 'SC7_RACK_PRIVATE_BIN' "$CONFIG_DIR/inner.sh"; then
+# Refresh older installed launch scripts that predate the Files host bridge.
+if [[ ! -f "$CONFIG_DIR/inner.sh" ]] || ! grep -q 'sc7-rack-files' "$CONFIG_DIR/inner.sh"; then
     cp "$PROJECT_ROOT/config/inner.sh" "$CONFIG_DIR/inner.sh"
     chmod +x "$CONFIG_DIR/inner.sh"
 fi

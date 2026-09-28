@@ -69,6 +69,7 @@ Host Desktop: System76 COSMIC Desktop Environment (smithay)
 
 ### File Copy / Paste
 - **Rack -> Host**: Inside nested COSMIC Files, select file(s) -> `Ctrl+C` -> click host COSMIC Files window or desktop -> `Ctrl+V`. Files are copied/transferred normally via standard `text/uri-list` protocol.
+- **Open files**: Double-click a document in Rack's COSMIC Files to open its associated application on the host desktop. You can move that application between monitors; COSMIC Files stays in Rack.
 - **Host -> Rack**: In host COSMIC Files, select file(s) -> `Ctrl+C` -> click nested COSMIC Files -> `Ctrl+V`.
 
 ---
@@ -195,7 +196,7 @@ Run the automated test suite covering all 40 acceptance gates:
 cd sc7-rack
 ./tests/acceptance_tests.sh
 ```
-All 40 gates are verified automated live:
+All 41 gates are verified automated live:
 - Gates 1–20: Base architecture, layout, binaries, narrow sudo rule, no cheat tools.
 - Gates 21–22: Bidirectional text copy/paste.
 - Gates 23–24: Bidirectional file copy/paste (`text/uri-list`).
@@ -207,4 +208,4 @@ All 40 gates are verified automated live:
 - Gates 31–33: Drag-and-drop investigation, blocker documentation, and architecture report.
 - Gate 34: Complete COSMIC Files feature parity verification (see [`docs/COSMIC_FILES_PARITY.md`](docs/COSMIC_FILES_PARITY.md)).
 - Gates 35–40: **Source reproducibility** — pinned wlroots base SHA, tracked patch, bootstrap script, DnD markers, launcher LD_LIBRARY_PATH, built library present.
-
+- Gate 41: Host opening bridge regression tests, including direct MIME launches from COSMIC Files.

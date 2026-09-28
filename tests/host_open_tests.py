@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline regression tests for Rack's host file-association bridge."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,9 @@ LAUNCHER = ROOT / "bin/sc7-rack"
 INNER = ROOT / "config/inner.sh"
 SHIM = ROOT / "bin/rack-private/xdg-open"
 HELPER = ROOT / "bin/sc7-rack-open-host"
+FILES_BRIDGE = ROOT / "bin/sc7-rack-files"
+
+
 def write_executable(path, body):
     path.write_text(f"#!{sys.executable}\n" + body, encoding="utf-8")
     path.chmod(0o755)
@@ -45,6 +49,8 @@ class HostOpenTests(unittest.TestCase):
         cls.sway_capture = cls.base / "sway.json"
         cls.inner_capture = cls.base / "inner.jsonl"
         cls.open_capture = cls.base / "open.jsonl"
+        cls.files_capture = cls.base / "files.json"
+        cls.mime_capture = cls.base / "mime.json"
         cls.host_opener = cls.host_bin / "xdg-open"
         write_executable(
             cls.host_opener,
@@ -97,6 +103,38 @@ if sys.argv[1:3] == ["-t", "get_tree"]:
                                for i in range(4)]}))
 """,
         )
+        write_executable(
+            cls.host_bin / "cosmic-files",
+            """import json
+import os
+import socket
+import subprocess
+import sys
+
+fd = int(os.environ["WAYLAND_SOCKET"])
+connection = socket.socket(fileno=fd)
+connection.sendall(b"files-connected-to-nested-wayland")
+record = {"argv": sys.argv[1:], "env": dict(os.environ), "socket_fd": fd}
+with open(os.environ["SC7_TEST_FILES_CAPTURE"], "w", encoding="utf-8") as output:
+    json.dump(record, output)
+
+# Mirror wayland-client: consume WAYLAND_SOCKET before Files launches an app.
+os.environ.pop("WAYLAND_SOCKET")
+connection.close()
+subprocess.run(["arbitrary-mime-viewer", *sys.argv[1:]], check=True)
+""",
+        )
+        write_executable(
+            cls.host_bin / "arbitrary-mime-viewer",
+            """import json
+import os
+import sys
+
+record = {"argv": sys.argv[1:], "env": dict(os.environ)}
+with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
+    json.dump(record, output)
+""",
+        )
 
         cls.host_path = f"{cls.host_bin}:/usr/bin:/bin"
         cls.host_ld_path = str(cls.base / "host-libraries")
@@ -124,6 +162,8 @@ if sys.argv[1:3] == ["-t", "get_tree"]:
             SC7_TEST_SWAY_CAPTURE=str(cls.sway_capture),
             SC7_TEST_INNER_CAPTURE=str(cls.inner_capture),
             SC7_TEST_OPEN_CAPTURE=str(cls.open_capture),
+            SC7_TEST_FILES_CAPTURE=str(cls.files_capture),
+            SC7_TEST_MIME_CAPTURE=str(cls.mime_capture),
         )
 
         # Simulate an existing install whose copied inner.sh predates the shim.
@@ -178,10 +218,14 @@ if sys.argv[1:3] == ["-t", "get_tree"]:
             WLR_LIBINPUT_NO_DEVICES="nested-libinput",
             WAYLAND_SOCKET="nested-wayland-fd",
             XDG_ACTIVATION_TOKEN="nested-activation-token",
+            SC7_TEST_FILES_CAPTURE=str(cls.files_capture),
+            SC7_TEST_MIME_CAPTURE=str(cls.mime_capture),
         )
 
     def setUp(self):
         self.open_capture.unlink(missing_ok=True)
+        self.files_capture.unlink(missing_ok=True)
+        self.mime_capture.unlink(missing_ok=True)
 
     def invoke(self, args, env=None, executable=SHIM):
         return subprocess.run(
@@ -304,6 +348,71 @@ if sys.argv[1:3] == ["-t", "get_tree"]:
         result = self.invoke([str(directory), directory.as_uri(), local_host_uri])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(read_json_lines(self.open_capture), [])
+
+    def test_files_uses_nested_socket_but_direct_mime_apps_use_host(self):
+        nested_socket = self.nested_runtime / self.nested_env["WAYLAND_DISPLAY"]
+        documents = [self.home / "notes with spaces.md", self.home / "unknown.weird"]
+        for document in documents:
+            document.write_text("test", encoding="utf-8")
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            try:
+                listener.bind(str(nested_socket))
+            except PermissionError as error:
+                if error.errno == errno.EPERM:
+                    self.skipTest("sandbox forbids local UNIX socket listeners")
+                raise
+            listener.listen(1)
+            listener.settimeout(3)
+            result = self.invoke(documents, executable=FILES_BRIDGE)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with listener.accept()[0] as connection:
+                self.assertEqual(
+                    connection.recv(128), b"files-connected-to-nested-wayland"
+                )
+
+        files = json.loads(self.files_capture.read_text(encoding="utf-8"))
+        mime = json.loads(self.mime_capture.read_text(encoding="utf-8"))
+        self.assertEqual(files["argv"], list(map(str, documents)))
+        self.assertEqual(mime["argv"], list(map(str, documents)))
+        self.assertEqual(int(files["env"]["WAYLAND_SOCKET"]), files["socket_fd"])
+        self.assertEqual(files["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
+        self.assertEqual(mime["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
+        self.assertNotIn("WAYLAND_SOCKET", mime["env"])
+
+        for name in (
+            "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK",
+            "I3SOCK", "PATH", "LD_LIBRARY_PATH", "WLR_BACKENDS",
+            "WLR_LIBINPUT_NO_DEVICES",
+        ):
+            with self.subTest(variable=name):
+                self.assertEqual(files["env"].get(name), self.host_env[name])
+                self.assertEqual(mime["env"].get(name), self.host_env[name])
+        for name in ("SC7_HOST_WAYLAND_DISPLAY", "SC7_RACK_PRIVATE_BIN", "XDG_ACTIVATION_TOKEN"):
+            with self.subTest(stripped=name):
+                self.assertNotIn(name, files["env"])
+                self.assertNotIn(name, mime["env"])
+
+    def test_files_bridge_rejects_missing_session(self):
+        variations = (
+            ("missing host display", {"SC7_HOST_WAYLAND_DISPLAY": None}),
+            ("missing nested display", {"WAYLAND_DISPLAY": None}),
+            ("missing host path", {"SC7_HOST_PATH": None}),
+            ("same display", {"WAYLAND_DISPLAY": self.host_env["WAYLAND_DISPLAY"]}),
+            ("missing nested socket", {"WAYLAND_DISPLAY": "wayland-absent-test"}),
+        )
+        for label, changes in variations:
+            with self.subTest(case=label):
+                env = self.nested_env.copy()
+                for name, value in changes.items():
+                    if value is None:
+                        env.pop(name, None)
+                    else:
+                        env[name] = value
+                result = self.invoke([self.home / "test.txt"], env=env, executable=FILES_BRIDGE)
+                self.assertNotEqual(result.returncode, 0, label)
+                self.assertFalse(self.files_capture.exists(), label)
+                self.assertFalse(self.mime_capture.exists(), label)
 
 
 if __name__ == "__main__":

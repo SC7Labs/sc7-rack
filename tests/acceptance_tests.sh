@@ -41,7 +41,8 @@ fi
 
 # Gate 3: Binaries exist and are executable
 if [[ -x "$PROJECT_ROOT/bin/sc7-rack" && -x "$BRIDGE_BIN" && -x "$SETTINGS_BIN" && \
-      -x "$PROJECT_ROOT/bin/sc7-rack-open-host" && -x "$PROJECT_ROOT/bin/rack-private/xdg-open" ]]; then
+      -x "$PROJECT_ROOT/bin/sc7-rack-open-host" && -x "$PROJECT_ROOT/bin/sc7-rack-files" && \
+      -x "$PROJECT_ROOT/bin/rack-private/xdg-open" ]]; then
     log_pass 3 "Launcher, bridges, and settings binaries are executable"
 else
     log_fail 3 "Binaries missing or not executable"
@@ -104,7 +105,7 @@ fi
 
 # Gate 9: 2x2 layout quadrant setup
 if grep -q "intel_gpu_top" "$PROJECT_ROOT/config/inner.sh" && \
-   grep -q "cosmic-files" "$PROJECT_ROOT/config/inner.sh" && \
+   grep -q "sc7-rack-files" "$PROJECT_ROOT/config/inner.sh" && \
    grep -q "cosmic-monitor" "$PROJECT_ROOT/config/inner.sh" && \
    grep -q "htop" "$PROJECT_ROOT/config/inner.sh"; then
     log_pass 9 "Inner script defines all 4 quadrant views (GPU, Files, Monitor, htop)"
@@ -171,7 +172,8 @@ fi
 
 # Gate 16: Symlinks installed in ~/bin
 if [[ -L "$HOME/bin/sc7-rack" && -L "$HOME/bin/sc7-rack-settings" && \
-      -L "$HOME/bin/sc7-clipboard-bridge" && -L "$HOME/bin/sc7-rack-open-host" ]]; then
+      -L "$HOME/bin/sc7-clipboard-bridge" && -L "$HOME/bin/sc7-rack-open-host" && \
+      -L "$HOME/bin/sc7-rack-files" ]]; then
     log_pass 16 "Binaries correctly symlinked into ~/bin"
 else
     log_fail 16 "Symlinks missing in ~/bin"

@@ -188,7 +188,8 @@ wait_views 1 || true
 swaymsg split h >/dev/null
 TARGET_DIR="${FILES_PATH:-$HOME}"
 [[ -z "$TARGET_DIR" || ! -d "$TARGET_DIR" ]] && TARGET_DIR="$HOME"
-(cd "$TARGET_DIR" && cosmic-files "$TARGET_DIR" >/dev/null 2>&1 &)
+FILES_LAUNCHER="$(dirname "$SC7_RACK_PRIVATE_BIN")/sc7-rack-files"
+(cd "$TARGET_DIR" && exec "$FILES_LAUNCHER" "$TARGET_DIR") >/dev/null 2>&1 &
 record_pid $!
 wait_views 2 || true
 

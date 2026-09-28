@@ -47,7 +47,7 @@ fi
 # 4. Remove binaries / symlinks
 echo "Removing binaries and symlinks..."
 for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
-    for name in sc7-rack sc7-rack-settings sc7-clipboard-bridge sc7-rack-open-host rack; do
+    for name in sc7-rack sc7-rack-settings sc7-clipboard-bridge sc7-rack-open-host sc7-rack-files rack; do
         target="$bindir/$name"
         source_name="$name"
         [[ "$name" == rack ]] && source_name=sc7-rack
