@@ -21,7 +21,7 @@ log_fail() {
 }
 
 echo "=========================================================="
-echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-40)"
+echo "SC7 RACK ACCEPTANCE VERIFICATION SUITE (GATES 1-41)"
 echo "=========================================================="
 
 # Gate 1: Project location
@@ -40,8 +40,9 @@ else
 fi
 
 # Gate 3: Binaries exist and are executable
-if [[ -x "$PROJECT_ROOT/bin/sc7-rack" && -x "$BRIDGE_BIN" && -x "$SETTINGS_BIN" ]]; then
-    log_pass 3 "Launcher, bridge, and settings binaries are executable"
+if [[ -x "$PROJECT_ROOT/bin/sc7-rack" && -x "$BRIDGE_BIN" && -x "$SETTINGS_BIN" && \
+      -x "$PROJECT_ROOT/bin/sc7-rack-open-host" && -x "$PROJECT_ROOT/bin/rack-private/xdg-open" ]]; then
+    log_pass 3 "Launcher, bridges, and settings binaries are executable"
 else
     log_fail 3 "Binaries missing or not executable"
 fi
@@ -62,7 +63,7 @@ fi
 
 # Gate 6: Mandatory runtime dependencies installed
 # GPU monitoring tools and clipboard test tools are optional.
-MANDATORY_DEPS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3)
+MANDATORY_DEPS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3 xdg-open)
 OPTIONAL_DEPS=(intel_gpu_top nvidia-smi nvtop radeontop wl-copy wl-paste)
 MISSING_MANDATORY=()
 MISSING_OPTIONAL=()
@@ -169,7 +170,8 @@ else
 fi
 
 # Gate 16: Symlinks installed in ~/bin
-if [[ -L "$HOME/bin/sc7-rack" && -L "$HOME/bin/sc7-rack-settings" && -L "$HOME/bin/sc7-clipboard-bridge" ]]; then
+if [[ -L "$HOME/bin/sc7-rack" && -L "$HOME/bin/sc7-rack-settings" && \
+      -L "$HOME/bin/sc7-clipboard-bridge" && -L "$HOME/bin/sc7-rack-open-host" ]]; then
     log_pass 16 "Binaries correctly symlinked into ~/bin"
 else
     log_fail 16 "Symlinks missing in ~/bin"
@@ -467,6 +469,15 @@ if [[ -f "$WLROOTS_BUILD" ]]; then
     fi
 else
     log_fail 40 "vendor/wlroots/build/libwlroots.so.12 not found — run scripts/bootstrap-wlroots.sh"
+fi
+
+# Gate 41: Exercise the host-open bridge with isolated fake host applications.
+HOST_OPEN_TEST_OUTPUT="$(python3 "$PROJECT_ROOT/tests/host_open_tests.py" 2>&1)"
+if [[ $? -eq 0 ]]; then
+    log_pass 41 "Host-open bridge restores host environment and scopes interception to Rack"
+else
+    log_fail 41 "Host-open bridge regression tests failed"
+    echo "$HOST_OPEN_TEST_OUTPUT"
 fi
 
 echo "=========================================================="

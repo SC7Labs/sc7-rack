@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Offline regression tests for Rack's host file-association bridge."""
+
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+
+ROOT = Path(__file__).resolve().parent.parent
+LAUNCHER = ROOT / "bin/sc7-rack"
+INNER = ROOT / "config/inner.sh"
+SHIM = ROOT / "bin/rack-private/xdg-open"
+HELPER = ROOT / "bin/sc7-rack-open-host"
+def write_executable(path, body):
+    path.write_text(f"#!{sys.executable}\n" + body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def read_json_lines(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+class HostOpenTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix="sc7-host-open-test-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        cls.base = Path(cls.temporary.name)
+        cls.home = cls.base / "home"
+        cls.host_bin = cls.base / "host-bin"
+        cls.runtime = cls.base / "host-runtime"
+        cls.nested_runtime = cls.base / "nested-runtime"
+        cls.config = cls.base / "config"
+        for directory in (cls.home, cls.host_bin, cls.runtime, cls.nested_runtime, cls.config):
+            directory.mkdir()
+
+        cls.sway_capture = cls.base / "sway.json"
+        cls.inner_capture = cls.base / "inner.jsonl"
+        cls.open_capture = cls.base / "open.jsonl"
+        cls.host_opener = cls.host_bin / "xdg-open"
+        write_executable(
+            cls.host_opener,
+            """import json
+import os
+import sys
+
+keys = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK", "I3SOCK", "PATH",
+        "LD_LIBRARY_PATH", "WLR_BACKENDS", "WLR_LIBINPUT_NO_DEVICES",
+        "WAYLAND_SOCKET", "XDG_ACTIVATION_TOKEN")
+record = {"argv": sys.argv[1:],
+          "env": {key: os.environ[key] for key in keys if key in os.environ}}
+with open(os.environ["SC7_TEST_OPEN_CAPTURE"], "a", encoding="utf-8") as output:
+    output.write(json.dumps(record, ensure_ascii=False) + "\\n")
+""",
+        )
+        write_executable(
+            cls.host_bin / "sway",
+            """import json
+import os
+import shutil
+
+keep = {"HOME", "XDG_BIN_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+        "WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK",
+        "I3SOCK", "PATH", "LD_LIBRARY_PATH", "WLR_BACKENDS",
+        "WLR_LIBINPUT_NO_DEVICES", "SC7_RACK_PRIVATE_BIN",
+        "SC7_TEST_SWAY_CAPTURE", "SC7_TEST_INNER_CAPTURE",
+        "SC7_TEST_OPEN_CAPTURE"}
+record = {"env": {key: value for key, value in os.environ.items()
+                  if key in keep or key.startswith("SC7_HOST_")},
+          "resolved_open": shutil.which("xdg-open")}
+with open(os.environ["SC7_TEST_SWAY_CAPTURE"], "w", encoding="utf-8") as output:
+    json.dump(record, output)
+""",
+        )
+        write_executable(
+            cls.host_bin / "swaymsg",
+            """import json
+import os
+import shutil
+import sys
+
+record = {"argv": sys.argv[1:], "path": os.environ.get("PATH", ""),
+          "resolved_open": shutil.which("xdg-open")}
+with open(os.environ["SC7_TEST_INNER_CAPTURE"], "a", encoding="utf-8") as output:
+    output.write(json.dumps(record) + "\\n")
+if sys.argv[1:3] == ["-t", "get_tree"]:
+    print(json.dumps({"nodes": [{"type": "con", "app_id": str(i)}
+                               for i in range(4)]}))
+""",
+        )
+
+        cls.host_path = f"{cls.host_bin}:/usr/bin:/bin"
+        cls.host_ld_path = str(cls.base / "host-libraries")
+        cls.host_bus = f"unix:path={cls.runtime}/bus"
+        cls.host_sway_socket = str(cls.runtime / "host-sway.sock")
+        cls.host_i3_socket = str(cls.runtime / "host-i3.sock")
+        cls.host_env = os.environ.copy()
+        for key in tuple(cls.host_env):
+            if key.startswith("SC7_HOST_") or key.startswith("SC7_RACK_"):
+                del cls.host_env[key]
+        cls.host_env.update(
+            HOME=str(cls.home),
+            XDG_BIN_HOME=str(cls.host_bin),
+            XDG_CONFIG_HOME=str(cls.config),
+            XDG_RUNTIME_DIR=str(cls.runtime),
+            WAYLAND_DISPLAY="wayland-sc7-host-test",
+            DISPLAY=":77",
+            DBUS_SESSION_BUS_ADDRESS=cls.host_bus,
+            SWAYSOCK=cls.host_sway_socket,
+            I3SOCK=cls.host_i3_socket,
+            PATH=cls.host_path,
+            LD_LIBRARY_PATH=cls.host_ld_path,
+            WLR_BACKENDS="host-backend",
+            WLR_LIBINPUT_NO_DEVICES="host-libinput",
+            SC7_TEST_SWAY_CAPTURE=str(cls.sway_capture),
+            SC7_TEST_INNER_CAPTURE=str(cls.inner_capture),
+            SC7_TEST_OPEN_CAPTURE=str(cls.open_capture),
+        )
+
+        # Simulate an existing install whose copied inner.sh predates the shim.
+        cls.installed_inner = cls.config / "sc7-rack/inner.sh"
+        cls.installed_inner.parent.mkdir()
+        cls.installed_inner.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+        cls.installed_inner.chmod(0o755)
+
+        launched = subprocess.run(
+            [str(LAUNCHER)], env=cls.host_env, cwd=cls.home,
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if launched.returncode != 0 or not cls.sway_capture.exists():
+            raise AssertionError(
+                f"Fake-Sway launcher failed ({launched.returncode}): "
+                f"{launched.stdout}\n{launched.stderr}"
+            )
+        cls.sway_record = json.loads(cls.sway_capture.read_text(encoding="utf-8"))
+        cls.sway_env = cls.sway_record["env"]
+
+        # A populated tree makes inner.sh stop before spawning any Rack views.
+        settings = cls.config / "sc7-rack/settings.json"
+        settings.write_text(json.dumps({"share_clipboard": False}), encoding="utf-8")
+        inner_env = cls.sway_env.copy()
+        inner_env["WAYLAND_DISPLAY"] = "wayland-sc7-nested-test"
+        inner = subprocess.run(
+            [str(cls.config / "sc7-rack/inner.sh")], env=inner_env, cwd=cls.home,
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if inner.returncode != 0 or not cls.inner_capture.exists():
+            raise AssertionError(
+                f"Fake-inner session failed ({inner.returncode}): "
+                f"{inner.stdout}\n{inner.stderr}"
+            )
+        cls.inner_records = read_json_lines(cls.inner_capture)
+        tree_records = [r for r in cls.inner_records if r["argv"][:2] == ["-t", "get_tree"]]
+        if not tree_records:
+            raise AssertionError("inner.sh never queried the fake Sway tree")
+        cls.nested_path = tree_records[-1]["path"]
+
+        cls.nested_env = cls.sway_env.copy()
+        cls.nested_env.update(
+            WAYLAND_DISPLAY="wayland-sc7-nested-test",
+            DISPLAY=":99",
+            XDG_RUNTIME_DIR=str(cls.nested_runtime),
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/nested/test-bus",
+            SWAYSOCK=str(cls.nested_runtime / "nested-sway.sock"),
+            I3SOCK=str(cls.nested_runtime / "nested-i3.sock"),
+            PATH=cls.nested_path,
+            LD_LIBRARY_PATH=str(cls.base / "nested-only-libraries"),
+            WLR_BACKENDS="nested-backend",
+            WLR_LIBINPUT_NO_DEVICES="nested-libinput",
+            WAYLAND_SOCKET="nested-wayland-fd",
+            XDG_ACTIVATION_TOKEN="nested-activation-token",
+        )
+
+    def setUp(self):
+        self.open_capture.unlink(missing_ok=True)
+
+    def invoke(self, args, env=None, executable=SHIM):
+        return subprocess.run(
+            [str(executable), *map(str, args)],
+            env=env or self.nested_env, cwd=self.home,
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+
+    def wait_for_records(self, count):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            records = read_json_lines(self.open_capture)
+            if len(records) >= count:
+                return records
+            time.sleep(0.02)
+        self.fail(f"Expected {count} host opener calls, got {read_json_lines(self.open_capture)}")
+
+    def test_launcher_preserves_host_environment_and_scopes_private_path(self):
+        expected = {
+            "SC7_HOST_WAYLAND_DISPLAY": self.host_env["WAYLAND_DISPLAY"],
+            "SC7_HOST_DISPLAY": self.host_env["DISPLAY"],
+            "SC7_HOST_XDG_RUNTIME_DIR": self.host_env["XDG_RUNTIME_DIR"],
+            "SC7_HOST_DBUS_SESSION_BUS_ADDRESS": self.host_bus,
+            "SC7_HOST_SWAYSOCK": self.host_sway_socket,
+            "SC7_HOST_I3SOCK": self.host_i3_socket,
+            "SC7_HOST_PATH": self.host_path,
+            "SC7_HOST_LD_LIBRARY_PATH": self.host_ld_path,
+            "SC7_HOST_XDG_OPEN": str(self.host_opener.resolve()),
+        }
+        for key, value in expected.items():
+            with self.subTest(variable=key):
+                self.assertEqual(self.sway_env.get(key), value)
+        self.assertEqual(self.sway_record["resolved_open"], str(SHIM))
+        self.assertEqual(self.host_env["PATH"], self.host_path)
+
+    def test_inner_session_keeps_private_opener_first(self):
+        self.assertEqual(self.installed_inner.read_bytes(), INNER.read_bytes())
+        self.assertEqual(self.inner_records[-1]["resolved_open"], str(SHIM))
+        self.assertEqual(self.nested_path.split(":", 1)[0], str(SHIM.parent))
+        self.assertEqual(self.sway_env["SC7_HOST_PATH"], self.host_path)
+
+    def test_helper_restores_host_environment_and_exact_arguments(self):
+        unusual = self.home / "report with spaces;$(touch SHOULD_NOT_EXIST)&.pdf"
+        unusual.write_bytes(b"test document")
+        args = [str(unusual), unusual.as_uri(), "https://example.test/a?q=one%20two&x=$value"]
+        mime_file = self.config / "mimeapps.list"
+        mime_before = b"[Default Applications]\napplication/pdf=unchanged.desktop;\n"
+        mime_file.write_bytes(mime_before)
+        mime_files_before = sorted(self.home.rglob("mimeapps.list")) + sorted(
+            self.config.rglob("mimeapps.list")
+        )
+
+        result = self.invoke(args)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = self.wait_for_records(len(args))
+        self.assertEqual(sorted(record["argv"][0] for record in records), sorted(args))
+        self.assertTrue(all(len(record["argv"]) == 1 for record in records))
+        self.assertFalse((self.home / "SHOULD_NOT_EXIST").exists())
+        expected = {
+            "WAYLAND_DISPLAY": self.host_env["WAYLAND_DISPLAY"],
+            "DISPLAY": self.host_env["DISPLAY"],
+            "XDG_RUNTIME_DIR": str(self.runtime),
+            "DBUS_SESSION_BUS_ADDRESS": self.host_bus,
+            "SWAYSOCK": self.host_sway_socket,
+            "I3SOCK": self.host_i3_socket,
+            "PATH": self.host_path,
+            "LD_LIBRARY_PATH": self.host_ld_path,
+            "WLR_BACKENDS": self.host_env["WLR_BACKENDS"],
+            "WLR_LIBINPUT_NO_DEVICES": self.host_env["WLR_LIBINPUT_NO_DEVICES"],
+        }
+        for record in records:
+            for key, value in expected.items():
+                with self.subTest(variable=key):
+                    self.assertEqual(record["env"].get(key), value)
+            self.assertNotIn("WAYLAND_SOCKET", record["env"])
+            self.assertNotIn("XDG_ACTIVATION_TOKEN", record["env"])
+        self.assertEqual(mime_file.read_bytes(), mime_before)
+        self.assertEqual(
+            sorted(self.home.rglob("mimeapps.list")) + sorted(self.config.rglob("mimeapps.list")),
+            mime_files_before,
+        )
+
+    def test_unset_host_values_do_not_leak_nested_values(self):
+        env = self.nested_env.copy()
+        for key in ("DISPLAY", "SWAYSOCK", "I3SOCK", "LD_LIBRARY_PATH"):
+            env[f"SC7_HOST_{key}"] = ""
+            env[f"SC7_HOST_{key}_SET"] = ""
+        result = self.invoke(["https://example.test/no-host-display"], env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        child_env = self.wait_for_records(1)[0]["env"]
+        for key in ("DISPLAY", "SWAYSOCK", "I3SOCK", "LD_LIBRARY_PATH"):
+            with self.subTest(variable=key):
+                self.assertNotIn(key, child_env)
+
+    def test_recursive_opener_is_rejected(self):
+        env = self.nested_env.copy()
+        env["SC7_HOST_XDG_OPEN"] = str(SHIM)
+        result = self.invoke(["https://example.test/recursion"], env=env, executable=HELPER)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recursive", result.stderr.lower())
+        self.assertEqual(read_json_lines(self.open_capture), [])
+
+    def test_slow_host_opener_does_not_block_files(self):
+        slow_opener = self.host_bin / "xdg-open-slow"
+        write_executable(slow_opener, "import time\ntime.sleep(1.5)\n")
+        env = self.nested_env.copy()
+        env["SC7_HOST_XDG_OPEN"] = str(slow_opener)
+        started = time.monotonic()
+        result = self.invoke(["https://example.test/slow"], env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(time.monotonic() - started, 0.8)
+
+    def test_directory_paths_stay_out_of_host_opener(self):
+        directory = self.home / "folder with spaces"
+        directory.mkdir(exist_ok=True)
+        local_host_uri = directory.as_uri().replace(
+            "file://", f"file://{socket.gethostname()}", 1
+        )
+        result = self.invoke([str(directory), directory.as_uri(), local_host_uri])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(read_json_lines(self.open_capture), [])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

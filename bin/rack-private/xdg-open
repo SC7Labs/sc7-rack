@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Only Rack's nested session places this shim ahead of the system xdg-open.
+SCRIPT_DIR="$(dirname "$(readlink -f -- "$0")")"
+exec "$SCRIPT_DIR/../sc7-rack-open-host" "$@"

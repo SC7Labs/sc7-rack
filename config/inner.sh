@@ -4,6 +4,9 @@ set -u
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
 export PATH="$XDG_BIN_HOME:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ -n "${SC7_RACK_PRIVATE_BIN:-}" && -x "$SC7_RACK_PRIVATE_BIN/xdg-open" ]]; then
+    export PATH="$SC7_RACK_PRIVATE_BIN:$PATH"
+fi
 
 SETTINGS_FILE="$XDG_CONFIG_HOME/sc7-rack/settings.json"
 FILES_PATH="${FILES_PATH:-$HOME}"

@@ -24,9 +24,10 @@ declare -A APT_PACKAGES=(
     [cosmic-monitor]="" # COSMIC desktop component
     [htop]="htop"
     [python3]="python3"
+    [xdg-open]="xdg-utils"
 )
 
-MANDATORY_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3)
+MANDATORY_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3 xdg-open)
 MISSING_CMDS=()
 APT_INSTALLABLE=()
 COSMIC_MISSING=()
@@ -141,7 +142,7 @@ if [[ ${#NON_COSMIC_MISSING[@]} -gt 0 ]]; then
     done
     echo "" >&2
     if command -v apt-get >/dev/null 2>&1; then
-        echo "  Install with:  sudo apt install sway htop python3" >&2
+        echo "  Install with:  sudo apt install sway htop python3 xdg-utils" >&2
     elif command -v dnf >/dev/null 2>&1; then
         echo "  Install with:  sudo dnf install sway htop python3" >&2
     elif command -v pacman >/dev/null 2>&1; then
@@ -281,6 +282,7 @@ for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
     ln -sf "$SCRIPT_DIR/bin/sc7-rack" "$bindir/sc7-rack"
     ln -sf "$SCRIPT_DIR/bin/sc7-rack-settings" "$bindir/sc7-rack-settings"
     ln -sf "$SCRIPT_DIR/bin/sc7-clipboard-bridge" "$bindir/sc7-clipboard-bridge"
+    ln -sf "$SCRIPT_DIR/bin/sc7-rack-open-host" "$bindir/sc7-rack-open-host"
     # Create 'rack' symlink pointing to sc7-rack
     ln -sf "$SCRIPT_DIR/bin/sc7-rack" "$bindir/rack"
 done
@@ -329,7 +331,7 @@ done
 
 echo ""
 echo "── Post-install runtime validation ──"
-VALIDATION_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop sc7-rack sc7-rack-settings)
+VALIDATION_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop xdg-open sc7-rack sc7-rack-settings sc7-rack-open-host)
 VALIDATION_FAILED=false
 
 # Ensure newly installed symlinks are findable
@@ -381,4 +383,3 @@ echo "CLI Commands:"
 echo "  sc7-rack             - Launch SC7Labs Rack"
 echo "  sc7-rack-settings    - Manage settings (GUI / CLI)"
 echo "  rack                 - Shell shortcut (symlink + alias)"
-

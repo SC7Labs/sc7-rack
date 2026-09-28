@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Capture the host session before preparing Rack's nested compositor.
+export SC7_HOST_PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}"
+for var in DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS SWAYSOCK I3SOCK \
+           LD_LIBRARY_PATH WLR_BACKENDS WLR_LIBINPUT_NO_DEVICES; do
+    value_name="SC7_HOST_$var"
+    set_name="${value_name}_SET"
+    printf -v "$value_name" '%s' "${!var-}"
+    printf -v "$set_name" '%s' "${!var+x}"
+    export "$value_name" "$set_name"
+done
+
 # Ensure essential paths in environment
 XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
 export PATH="$XDG_BIN_HOME:$HOME/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
@@ -119,7 +130,7 @@ if RUNNING_PID="$(get_running_rack_pid)"; then
 fi
 
 # Ensure host Wayland display is discovered dynamically and preserved
-HOST_DISP="${SC7_HOST_WAYLAND_DISPLAY:-${WAYLAND_DISPLAY:-}}"
+HOST_DISP="${WAYLAND_DISPLAY:-${SC7_HOST_WAYLAND_DISPLAY:-}}"
 if [[ -z "$HOST_DISP" ]]; then
     for lockfile in "$RUNTIME_DIR"/wayland-[0-9]*.lock; do
         if [[ -f "$lockfile" ]] && fuser "$lockfile" >/dev/null 2>&1; then
@@ -128,9 +139,26 @@ if [[ -z "$HOST_DISP" ]]; then
         fi
     done
 fi
-HOST_DISP="${HOST_DISP:-wayland-0}"
+if [[ -z "$HOST_DISP" ]]; then
+    echo "Error: could not find the host Wayland display." >&2
+    exit 1
+fi
 export SC7_HOST_WAYLAND_DISPLAY="$HOST_DISP"
 export WAYLAND_DISPLAY="$HOST_DISP"
+
+# Resolve the host opener before the nested session receives its private shim.
+HOST_XDG_OPEN="$(type -P xdg-open || true)"
+if [[ -z "$HOST_XDG_OPEN" || ! -x "$HOST_XDG_OPEN" ]]; then
+    echo "Error: host xdg-open is unavailable." >&2
+    exit 1
+fi
+export SC7_HOST_XDG_OPEN="$(readlink -f -- "$HOST_XDG_OPEN")"
+export SC7_RACK_PRIVATE_BIN="$PROJECT_ROOT/bin/rack-private"
+if [[ ! -x "$SC7_RACK_PRIVATE_BIN/xdg-open" || ! -x "$PROJECT_ROOT/bin/sc7-rack-open-host" ]]; then
+    echo "Error: Rack host-open bridge is missing or not executable." >&2
+    exit 1
+fi
+
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-COSMIC}"
 export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}"
 export SC7_APP_ID="dev.sc7labs.rack"
@@ -173,7 +201,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     mkdir -p "$CONFIG_DIR"
     cp "$PROJECT_ROOT/config/config" "$CONFIG_FILE"
 fi
-if [[ ! -f "$CONFIG_DIR/inner.sh" ]]; then
+# Refresh older installed launch scripts that predate the private opener.
+if [[ ! -f "$CONFIG_DIR/inner.sh" ]] || ! grep -q 'SC7_RACK_PRIVATE_BIN' "$CONFIG_DIR/inner.sh"; then
     cp "$PROJECT_ROOT/config/inner.sh" "$CONFIG_DIR/inner.sh"
     chmod +x "$CONFIG_DIR/inner.sh"
 fi
@@ -221,7 +250,7 @@ cleanup() {
 }
 
 cd "$HOME"
-sway --config "$CONFIG_FILE" &
+PATH="$SC7_RACK_PRIVATE_BIN:$PATH" sway --config "$CONFIG_FILE" &
 SWAY_PID=$!
 echo "$SWAY_PID" > "$PID_FILE"
 

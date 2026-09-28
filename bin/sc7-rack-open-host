@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Open a file association from nested Rack on the original host desktop.
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+    echo "sc7-rack-open-host: expected at least one file or URI" >&2
+    exit 1
+fi
+
+# The launcher resolves this path before installing Rack's private xdg-open.
+# Never search PATH here: it contains the private shim inside the nested session.
+HOST_OPEN="${SC7_HOST_XDG_OPEN:-}"
+SELF="$(readlink -f -- "$0")"
+PRIVATE_OPEN="$(readlink -f -- "$(dirname "$SELF")/rack-private/xdg-open")"
+if [[ "$HOST_OPEN" != /* || ! -x "$HOST_OPEN" ]]; then
+    echo "sc7-rack-open-host: host xdg-open was not captured" >&2
+    exit 1
+fi
+HOST_OPEN="$(readlink -f -- "$HOST_OPEN")"
+if [[ "$HOST_OPEN" == "$PRIVATE_OPEN" || "$HOST_OPEN" == "$SELF" ]]; then
+    echo "sc7-rack-open-host: refusing recursive opener" >&2
+    exit 1
+fi
+if [[ -z "${SC7_HOST_WAYLAND_DISPLAY:-}" || -z "${SC7_HOST_PATH:-}" ]]; then
+    echo "sc7-rack-open-host: host session was not captured" >&2
+    exit 1
+fi
+
+# Preserve unset versus empty host values. In particular, nested Sway's IPC
+# sockets and the patched wlroots library path must not reach host apps.
+restore_host_var() {
+    local name="$1" saved="SC7_HOST_$1" present="SC7_HOST_${1}_SET"
+    if [[ "${!present:-}" == x ]]; then
+        printf -v "$name" '%s' "${!saved-}"
+        export "$name"
+    else
+        unset "$name"
+    fi
+}
+
+export WAYLAND_DISPLAY="$SC7_HOST_WAYLAND_DISPLAY"
+export PATH="$SC7_HOST_PATH"
+for var in DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS SWAYSOCK I3SOCK \
+           LD_LIBRARY_PATH WLR_BACKENDS WLR_LIBINPUT_NO_DEVICES; do
+    restore_host_var "$var"
+done
+unset SC7_RACK_PRIVATE_BIN SC7_APP_ID SC7_APP_TITLE \
+      WAYLAND_SOCKET XDG_ACTIVATION_TOKEN
+for var in WAYLAND_DISPLAY PATH DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS \
+           SWAYSOCK I3SOCK LD_LIBRARY_PATH WLR_BACKENDS WLR_LIBINPUT_NO_DEVICES \
+           XDG_OPEN; do
+    unset "SC7_HOST_$var" "SC7_HOST_${var}_SET"
+done
+
+# COSMIC Files navigates directories internally. If one reaches xdg-open,
+# suppress the external association rather than opening host COSMIC Files.
+is_directory() {
+    local target="$1"
+    [[ -d "$target" ]] && return 0
+    [[ "$target" == file://* ]] || return 1
+    python3 - "$target" <<'PY'
+import os
+import socket
+import sys
+from urllib.parse import unquote_to_bytes, urlsplit
+
+uri = urlsplit(sys.argv[1])
+local_hosts = {"", "localhost", socket.gethostname().lower(), socket.getfqdn().lower()}
+if uri.scheme != "file" or (uri.hostname or "").lower() not in local_hosts:
+    raise SystemExit(1)
+path = os.fsdecode(unquote_to_bytes(uri.path))
+raise SystemExit(0 if os.path.isdir(path) else 1)
+PY
+}
+
+for target in "$@"; do
+    if is_directory "$target"; then
+        continue
+    fi
+    # Some desktop handlers keep xdg-open alive until the viewer closes.
+    # Let Files return as soon as the host opener has been launched.
+    "$HOST_OPEN" "$target" </dev/null >/dev/null 2>&1 &
+done
