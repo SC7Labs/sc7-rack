@@ -203,13 +203,13 @@ fi
 
 if [[ ! -f "$BUILD_DIR/build.ninja" ]] || [[ "$FORCE_REBUILD" == "true" ]]; then
     info "Configuring wlroots build with meson..."
+    # wlroots 0.17.4: only -Dexamples=false is needed.
+    # The wayland backend is auto-detected when wayland-client is present.
+    # Do NOT pass -Dbackends=wayland — that value is not valid in 0.17.4.
+    # Do NOT pass --prefix=/usr — build stays local, never installed system-wide.
     meson setup \
-        --prefix=/usr \
         --buildtype=release \
-        -Dxwayland=disabled \
-        -Dbackends=wayland \
-        -Drenderers=gles2 \
-        -Dallocators=shm \
+        -Dexamples=false \
         "$BUILD_DIR" \
         "$WLROOTS_DIR" \
         || die "meson setup failed"

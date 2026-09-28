@@ -195,13 +195,56 @@ for cmd in "${OPTIONAL_GPU_CMDS[@]}"; do
     fi
 done
 
-# ─── Phase 2: Build clipboard bridge ────────────────────────────────────────
+# ─── Phase 2: Bootstrap patched wlroots (SC7Labs DnD + lifecycle) ───────────
+
+echo ""
+echo "── Bootstrapping patched wlroots (required for SC7Labs DnD) ──"
+
+WLROOTS_BUILD="$SCRIPT_DIR/vendor/wlroots/build"
+WLROOTS_LIB="$WLROOTS_BUILD/libwlroots.so.12"
+
+if [[ ! -f "$WLROOTS_LIB" ]]; then
+    echo "  Patched wlroots build not found — running bootstrap..."
+    if [[ ! -x "$SCRIPT_DIR/scripts/bootstrap-wlroots.sh" ]]; then
+        echo "" >&2
+        echo "════════════════════════════════════════════════════════════" >&2
+        echo "  ERROR: scripts/bootstrap-wlroots.sh is missing or not executable." >&2
+        echo "  SC7Labs Rack DnD requires a patched local wlroots build." >&2
+        echo "  System wlroots was NOT modified." >&2
+        echo "════════════════════════════════════════════════════════════" >&2
+        exit 1
+    fi
+    "$SCRIPT_DIR/scripts/bootstrap-wlroots.sh" || {
+        echo "" >&2
+        echo "════════════════════════════════════════════════════════════" >&2
+        echo "  ERROR: Patched wlroots bootstrap failed." >&2
+        echo "  SC7Labs Rack DnD requires a local patched wlroots build." >&2
+        echo "  System wlroots was NOT modified." >&2
+        echo "  Fix the build error above and re-run ./install.sh" >&2
+        echo "════════════════════════════════════════════════════════════" >&2
+        exit 1
+    }
+fi
+
+# Final verification — must have the patched library
+if [[ ! -f "$WLROOTS_LIB" ]]; then
+    echo "" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "  ERROR: $WLROOTS_LIB is still missing after bootstrap." >&2
+    echo "  SC7Labs Rack will NOT silently fall back to system wlroots." >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    exit 1
+fi
+
+echo "  ✓ Patched wlroots: $WLROOTS_LIB"
+
+# ─── Phase 3: Build clipboard bridge ────────────────────────────────────────
 
 echo ""
 echo "── Building clipboard bridge ──"
 make -C "$SCRIPT_DIR/bridge"
 
-# ─── Phase 3: Setup sudo rule for intel_gpu_top ─────────────────────────────
+# ─── Phase 4: Setup sudo rule for intel_gpu_top (optional) ──────────────────
 
 IGT="$(command -v intel_gpu_top || true)"
 if [[ -n "$IGT" ]] && sudo -n true 2>/dev/null; then
@@ -215,7 +258,7 @@ if [[ -n "$IGT" ]] && sudo -n true 2>/dev/null; then
     fi
 fi
 
-# ─── Phase 4: Copy config files (preserve existing settings) ────────────────
+# ─── Phase 5: Copy config files (preserve existing settings) ─────────────────
 
 mkdir -p "$HOME/bin" "$XDG_BIN_HOME" "$XDG_CONFIG_HOME/sc7-rack" "$XDG_DATA_HOME/applications"
 
@@ -231,7 +274,7 @@ else
     echo "Preserved existing user settings at $SETTINGS_DEST"
 fi
 
-# ─── Phase 5: Link binaries to ~/.local/bin and ~/bin ────────────────────────
+# ─── Phase 6: Link binaries to ~/.local/bin and ~/bin ────────────────────────
 
 for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
     mkdir -p "$bindir"
@@ -242,7 +285,7 @@ for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
     ln -sf "$SCRIPT_DIR/bin/sc7-rack" "$bindir/rack"
 done
 
-# ─── Phase 6: Install icons into hicolor theme ──────────────────────────────
+# ─── Phase 7: Install icons into hicolor theme ───────────────────────────────
 
 HICOLOR="$XDG_DATA_HOME/icons/hicolor"
 mkdir -p "$HICOLOR/scalable/apps"
@@ -263,7 +306,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t "$HICOLOR" 2>/dev/null || true
 fi
 
-# ─── Phase 7: Install .desktop launchers ─────────────────────────────────────
+# ─── Phase 8: Install .desktop launchers ─────────────────────────────────────
 
 cp "$SCRIPT_DIR/desktop/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack.desktop"
 cp "$SCRIPT_DIR/desktop/sc7-rack-settings.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
@@ -274,7 +317,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$XDG_DATA_HOME/applications" 2>/dev/null || true
 fi
 
-# ─── Phase 8: Add shell alias ────────────────────────────────────────────────
+# ─── Phase 9: Add shell alias ─────────────────────────────────────────────────
 
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     if [[ -f "$rc" ]] && ! grep -qF "alias rack=" "$rc" 2>/dev/null; then
@@ -282,7 +325,7 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     fi
 done
 
-# ─── Phase 9: Post-install runtime validation ───────────────────────────────
+# ─── Phase 10: Post-install runtime validation ──────────────────────────────
 
 echo ""
 echo "── Post-install runtime validation ──"
@@ -312,6 +355,15 @@ for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
     fi
 done
 
+# Verify patched wlroots library (mandatory — no silent fallback)
+if [[ -f "$WLROOTS_LIB" ]]; then
+    echo "  ✓ Patched wlroots library present: $WLROOTS_LIB"
+else
+    echo "  ✗ Patched wlroots library MISSING: $WLROOTS_LIB" >&2
+    echo "    SC7Labs DnD will not function without this library." >&2
+    VALIDATION_FAILED=true
+fi
+
 if [[ "$VALIDATION_FAILED" == "true" ]]; then
     echo "" >&2
     echo "════════════════════════════════════════════════════════════" >&2
@@ -329,3 +381,4 @@ echo "CLI Commands:"
 echo "  sc7-rack             - Launch SC7Labs Rack"
 echo "  sc7-rack-settings    - Manage settings (GUI / CLI)"
 echo "  rack                 - Shell shortcut (symlink + alias)"
+

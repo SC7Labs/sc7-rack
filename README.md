@@ -97,12 +97,17 @@ cd sc7-rack
 ```
 
 This will:
-1. Check dependencies (Sway, Python 3, Tkinter).
-2. Build `sc7-clipboard-bridge` from clean C source.
-3. Link binaries to `~/.local/bin` and `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
-4. Setup Sway configuration in `~/.config/sc7-rack/`.
-5. Install FreeDesktop hicolor application icons and `.desktop` launchers for COSMIC App Library.
-6. Configure the `rack` shell alias.
+1. Check mandatory dependencies (`sway`, `swaymsg`, COSMIC desktop components, `htop`, `python3`).
+2. **Build and install a pinned local patched wlroots** (required for SC7Labs DnD and compositor lifecycle). System wlroots and `/usr/bin/sway` are **never replaced**.
+3. Build `sc7-clipboard-bridge` from clean C source.
+4. Link binaries to `~/.local/bin` and `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
+5. Setup Sway configuration in `~/.config/sc7-rack/`.
+6. Install FreeDesktop hicolor application icons and `.desktop` launchers for COSMIC App Library.
+7. Configure the `rack` shell alias.
+
+> **Note:** SC7Labs Rack targets the **COSMIC Desktop Environment on Wayland** (System76 COSMIC).
+> Generic Ubuntu/Wayland support is not guaranteed.
+
 
 ### Launching SC7Labs Rack
 Launch via the COSMIC App Menu by clicking **SC7Labs Rack**, or from terminal:
@@ -185,12 +190,12 @@ The top-left quadrant hosts hardware GPU diagnostics. SC7 Rack supports configur
 
 ## Acceptance Verification Suite
 
-Run the automated test suite covering all 33 acceptance criteria:
+Run the automated test suite covering all 40 acceptance gates:
 ```bash
 cd sc7-rack
 ./tests/acceptance_tests.sh
 ```
-All 34 gates are verified automated live:
+All 40 gates are verified automated live:
 - Gates 1–20: Base architecture, layout, binaries, narrow sudo rule, no cheat tools.
 - Gates 21–22: Bidirectional text copy/paste.
 - Gates 23–24: Bidirectional file copy/paste (`text/uri-list`).
@@ -201,3 +206,5 @@ All 34 gates are verified automated live:
 - Gates 29–30: Clean lifecycle termination and automatic re-establishment.
 - Gates 31–33: Drag-and-drop investigation, blocker documentation, and architecture report.
 - Gate 34: Complete COSMIC Files feature parity verification (see [`docs/COSMIC_FILES_PARITY.md`](docs/COSMIC_FILES_PARITY.md)).
+- Gates 35–40: **Source reproducibility** — pinned wlroots base SHA, tracked patch, bootstrap script, DnD markers, launcher LD_LIBRARY_PATH, built library present.
+
