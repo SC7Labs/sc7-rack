@@ -10,7 +10,7 @@ TEST_DIR="/tmp/sc7-parity-test-$$"
 mkdir -p "$TEST_DIR"
 
 cleanup() {
-    rm -rf "$TEST_DIR"
+    [[ ! -d "$TEST_DIR" ]] || rm -r -- "$TEST_DIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -146,10 +146,10 @@ echo "trash data" > "$TRASH_TEST_FILE"
 if command -v gio >/dev/null 2>&1; then
     gio trash "$TRASH_TEST_FILE"
     assert_true "gio trash sends file to FreeDesktop trash" "[[ ! -f '$TRASH_TEST_FILE' ]]"
-    rm -rf "$TRASH_DIR"
+    rm -r -- "$TRASH_DIR"
 else
     echo "[SKIP] [AUTO] gio command not found for trash CLI test"
-    rm -rf "$TRASH_DIR"
+    rm -r -- "$TRASH_DIR"
 fi
 
 # 6. DnD Action Support in wlroots

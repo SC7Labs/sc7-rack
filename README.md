@@ -94,12 +94,12 @@ Clone the repository and run the installer script:
 ```bash
 git clone https://github.com/SC7Labs/sc7-rack.git
 cd sc7-rack
-./scripts/install.sh
+./install.sh
 ```
 
 This will:
 1. Check mandatory dependencies (`sway`, `swaymsg`, COSMIC desktop components, `htop`, `python3`).
-2. **Build and install a pinned local patched wlroots** (required for SC7Labs DnD and compositor lifecycle). System wlroots and `/usr/bin/sway` are **never replaced**.
+2. Check the pinned wlroots build requirements. On Pop!_OS, Ubuntu, and Debian, the installer uses `sudo` to install only missing required apt packages, then checks them again. Build the patched wlroots locally for SC7Labs DnD and compositor lifecycle. System wlroots and `/usr/bin/sway` are **never replaced**. Rerunning `./install.sh` resumes a verified partial build.
 3. Build `sc7-clipboard-bridge` from clean C source.
 4. Link binaries to `~/.local/bin` and `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
 5. Setup Sway configuration in `~/.config/sc7-rack/`.
@@ -191,7 +191,7 @@ The top-left quadrant hosts hardware GPU diagnostics. SC7 Rack supports configur
 
 ## Acceptance Verification Suite
 
-Run the automated test suite covering all 40 acceptance gates:
+Run the automated test suite covering all 41 acceptance gates:
 ```bash
 cd sc7-rack
 ./tests/acceptance_tests.sh

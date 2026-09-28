@@ -204,28 +204,20 @@ echo "── Bootstrapping patched wlroots (required for SC7Labs DnD) ──"
 WLROOTS_BUILD="$SCRIPT_DIR/vendor/wlroots/build"
 WLROOTS_LIB="$WLROOTS_BUILD/libwlroots.so.12"
 
-if [[ ! -f "$WLROOTS_LIB" ]]; then
-    echo "  Patched wlroots build not found — running bootstrap..."
-    if [[ ! -x "$SCRIPT_DIR/scripts/bootstrap-wlroots.sh" ]]; then
-        echo "" >&2
-        echo "════════════════════════════════════════════════════════════" >&2
-        echo "  ERROR: scripts/bootstrap-wlroots.sh is missing or not executable." >&2
-        echo "  SC7Labs Rack DnD requires a patched local wlroots build." >&2
-        echo "  System wlroots was NOT modified." >&2
-        echo "════════════════════════════════════════════════════════════" >&2
-        exit 1
-    fi
-    "$SCRIPT_DIR/scripts/bootstrap-wlroots.sh" || {
-        echo "" >&2
-        echo "════════════════════════════════════════════════════════════" >&2
-        echo "  ERROR: Patched wlroots bootstrap failed." >&2
-        echo "  SC7Labs Rack DnD requires a local patched wlroots build." >&2
-        echo "  System wlroots was NOT modified." >&2
-        echo "  Fix the build error above and re-run ./install.sh" >&2
-        echo "════════════════════════════════════════════════════════════" >&2
-        exit 1
-    }
+if [[ ! -x "$SCRIPT_DIR/scripts/bootstrap-wlroots.sh" ]]; then
+    echo "  ERROR: scripts/bootstrap-wlroots.sh is missing or not executable." >&2
+    exit 1
 fi
+"$SCRIPT_DIR/scripts/bootstrap-wlroots.sh" --install-deps || {
+    echo "" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    echo "  ERROR: Patched wlroots bootstrap failed." >&2
+    echo "  SC7Labs Rack DnD requires a local patched wlroots build." >&2
+    echo "  System wlroots was NOT modified." >&2
+    echo "  Fix the build error above and re-run ./install.sh" >&2
+    echo "════════════════════════════════════════════════════════════" >&2
+    exit 1
+}
 
 # Final verification — must have the patched library
 if [[ ! -f "$WLROOTS_LIB" ]]; then
@@ -243,6 +235,10 @@ echo "  ✓ Patched wlroots: $WLROOTS_LIB"
 
 echo ""
 echo "── Building clipboard bridge ──"
+"$SCRIPT_DIR/scripts/wlroots_build_deps.py" --ensure --bridge-only || {
+    echo "  ERROR: Clipboard bridge build dependencies are unavailable." >&2
+    exit 1
+}
 make -C "$SCRIPT_DIR/bridge"
 
 # ─── Phase 4: Setup sudo rule for intel_gpu_top (optional) ──────────────────

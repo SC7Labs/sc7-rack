@@ -20,9 +20,10 @@
 #   - Never silently falls back to an unpatched build
 #
 # Usage:
-#   scripts/bootstrap-wlroots.sh [--force-rebuild]
+#   scripts/bootstrap-wlroots.sh [--force-rebuild] [--install-deps]
 #
-#   --force-rebuild  Re-apply patch and rebuild even if library already exists
+#   --force-rebuild  Rebuild even if the verified library already exists
+#   --install-deps    Install missing build inputs on supported apt systems
 #
 set -euo pipefail
 
@@ -36,9 +37,14 @@ BASE_REV_FILE="$REPO_ROOT/patches/WLROOTS_BASE_REVISION"
 UPSTREAM_URL="https://gitlab.freedesktop.org/wlroots/wlroots.git"
 
 FORCE_REBUILD=false
-if [[ "${1:-}" == "--force-rebuild" ]]; then
-    FORCE_REBUILD=true
-fi
+INSTALL_DEPS=false
+for arg in "$@"; do
+    case "$arg" in
+        --force-rebuild) FORCE_REBUILD=true ;;
+        --install-deps) INSTALL_DEPS=true ;;
+        *) echo "Unknown bootstrap option: $arg" >&2; exit 2 ;;
+    esac
+done
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -56,38 +62,68 @@ die() {
 
 info() { echo "  [bootstrap-wlroots] $*"; }
 
+verify_patched_source() {
+    local current_head actual_patch_id
+    current_head="$(git -C "$WLROOTS_DIR" rev-parse HEAD 2>/dev/null)" \
+        || die "Could not read wlroots HEAD"
+    git -C "$WLROOTS_DIR" merge-base --is-ancestor "$PINNED_SHA" "$current_head" \
+        || die "wlroots HEAD is not descended from the pinned base $PINNED_SHA"
+    [[ "$current_head" != "$PINNED_SHA" ]] \
+        || die "wlroots is still at the unpatched pinned base"
+    git -C "$WLROOTS_DIR" diff --quiet && git -C "$WLROOTS_DIR" diff --cached --quiet \
+        || die "wlroots has uncommitted tracked source changes"
+    actual_patch_id="$(git -C "$WLROOTS_DIR" diff --binary "$PINNED_SHA" "$current_head" |
+        git patch-id --stable | awk '{print $1}')"
+    [[ -n "$actual_patch_id" && "$actual_patch_id" == "$EXPECTED_PATCH_ID" ]] \
+        || die "wlroots changes do not match the tracked SC7Labs patch"
+}
+
 # ─── Step 0: Validate source files ───────────────────────────────────────────
 
 [[ -f "$BASE_REV_FILE" ]] || die "Missing: $BASE_REV_FILE"
 [[ -f "$PATCH_FILE" ]]    || die "Missing: $PATCH_FILE"
+DEPS_HELPER="$SCRIPT_DIR/wlroots_build_deps.py"
+[[ -x "$DEPS_HELPER" ]] || die "Missing build dependency checker: $DEPS_HELPER"
+
+# Git is needed to authenticate an existing build before the normal cache
+# check. A fresh GitHub clone already has it, but archive installs may not.
+if ! command -v git >/dev/null 2>&1; then
+    if [[ "$INSTALL_DEPS" == "true" ]]; then
+        "$DEPS_HELPER" --ensure || die "Required wlroots build dependencies are unavailable"
+    else
+        "$DEPS_HELPER" --check || die "Required wlroots build dependencies are unavailable"
+    fi
+fi
 
 PINNED_SHA="$(tr -d '[:space:]' < "$BASE_REV_FILE")"
 [[ -n "$PINNED_SHA" ]] || die "WLROOTS_BASE_REVISION is empty"
 [[ "${#PINNED_SHA}" -eq 40 ]] || die "WLROOTS_BASE_REVISION does not look like a full SHA-1: '$PINNED_SHA'"
 
 info "Pinned wlroots base revision: $PINNED_SHA"
+EXPECTED_PATCH_ID="$(git patch-id --stable < "$PATCH_FILE" | awk '{print $1}')"
+[[ -n "$EXPECTED_PATCH_ID" ]] || die "Could not identify the tracked wlroots patch"
 
 # ─── Step 1: Check build cache (skip if already done and not forced) ──────────
 
 BUILT_LIB="$BUILD_DIR/libwlroots.so.12"
 if [[ "$FORCE_REBUILD" == "false" && -f "$BUILT_LIB" ]]; then
-    # Verify the existing build came from the right patched source
-    if [[ -d "$WLROOTS_DIR/.git" ]]; then
-        EXISTING_HEAD="$(git -C "$WLROOTS_DIR" rev-parse HEAD 2>/dev/null || true)"
-        EXISTING_BRANCH="$(git -C "$WLROOTS_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-        info "Existing build found (HEAD=$EXISTING_HEAD branch=$EXISTING_BRANCH)"
-        # Accept if the HEAD is not the bare base (i.e. patch has been applied)
-        if [[ "$EXISTING_HEAD" != "$PINNED_SHA" ]]; then
-            info "Patched build already present — skipping rebuild."
-            info "  Built library: $BUILT_LIB"
-            exit 0
-        else
-            info "Warning: HEAD is at base SHA (patch not applied). Will re-patch and rebuild."
-        fi
-    else
-        info "Existing build found (no .git). Skipping rebuild."
+    [[ -d "$WLROOTS_DIR/.git" ]] \
+        || die "Built library exists without a verifiable wlroots Git checkout"
+    verify_patched_source
+    if command -v nm >/dev/null 2>&1 &&
+       nm -D "$BUILT_LIB" 2>/dev/null | grep -F "wlr_wl_backend_find_by_display" >/dev/null; then
+        info "Verified patched build already present — skipping rebuild."
+        info "  Built library: $BUILT_LIB"
         exit 0
     fi
+    info "Existing library cannot be verified — rebuilding."
+fi
+
+# Check/install build inputs before cloning or changing the wlroots checkout.
+if [[ "$INSTALL_DEPS" == "true" ]]; then
+    "$DEPS_HELPER" --ensure || die "Required wlroots build dependencies are unavailable"
+else
+    "$DEPS_HELPER" --check || die "Required wlroots build dependencies are unavailable"
 fi
 
 # ─── Step 2: Clone wlroots if not present ────────────────────────────────────
@@ -123,20 +159,18 @@ fi
 
 CURRENT_HEAD="$(git -C "$WLROOTS_DIR" rev-parse HEAD)"
 CURRENT_BRANCH="$(git -C "$WLROOTS_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")"
+PATCH_JUST_APPLIED=false
 
 info "Current wlroots HEAD:   $CURRENT_HEAD (branch: $CURRENT_BRANCH)"
 
 if [[ "$CURRENT_HEAD" != "$PINNED_SHA" ]]; then
-    # HEAD is not the base — check if the base is an ancestor (patch already applied)
-    if git -C "$WLROOTS_DIR" merge-base --is-ancestor "$PINNED_SHA" HEAD 2>/dev/null; then
-        info "Base SHA is ancestor of HEAD — patch appears already applied."
-        # Still need to build if library missing
-    else
-        die "HEAD ($CURRENT_HEAD) is not the pinned base ($PINNED_SHA) and is not a descendant. Refusing to patch."
-    fi
+    verify_patched_source
+    info "Authentic SC7Labs patch already committed — continuing to build."
 else
     # HEAD == base SHA: apply the patch
     info "Applying SC7Labs patch..."
+    git -C "$WLROOTS_DIR" diff --quiet && git -C "$WLROOTS_DIR" diff --cached --quiet \
+        || die "wlroots has uncommitted tracked source changes"
 
     # Dry-run first
     git -C "$WLROOTS_DIR" apply --check "$PATCH_FILE" \
@@ -154,75 +188,53 @@ else
         || die "git commit after patch failed"
 
     info "Patch applied and committed."
+    verify_patched_source
+    PATCH_JUST_APPLIED=true
 fi
 
-# ─── Step 4: Check build dependencies ────────────────────────────────────────
+# ─── Step 4: Configure with Meson ─────────────────────────────────────────────
 
-MISSING_BUILD_DEPS=()
-for dep in meson ninja gcc pkg-config; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
-        MISSING_BUILD_DEPS+=("$dep")
-    fi
-done
-
-# Check pkg-config dependencies
-for pc_dep in wayland-server wayland-client wlroots; do
-    # wlroots itself won't exist yet, skip its own pc check
-    [[ "$pc_dep" == "wlroots" ]] && continue
-    if ! pkg-config --exists "$pc_dep" 2>/dev/null; then
-        MISSING_BUILD_DEPS+=("pkg:$pc_dep")
-    fi
-done
-
-# Check for wayland-protocols and xkbcommon
-for pc_dep in wayland-protocols xkbcommon; do
-    if ! pkg-config --exists "$pc_dep" 2>/dev/null; then
-        MISSING_BUILD_DEPS+=("pkg:$pc_dep")
-    fi
-done
-
-if [[ ${#MISSING_BUILD_DEPS[@]} -gt 0 ]]; then
-    echo "" >&2
-    echo "  Missing build dependencies:" >&2
-    for dep in "${MISSING_BUILD_DEPS[@]}"; do
-        echo "    ✗ $dep" >&2
-    done
-    echo "" >&2
-    echo "  On Ubuntu/Debian, install with:" >&2
-    echo "    sudo apt install meson ninja-build gcc pkg-config \\" >&2
-    echo "      libwayland-dev libxkbcommon-dev wayland-protocols \\" >&2
-    echo "      libegl-dev libgles2-mesa-dev libgbm-dev libdrm-dev \\" >&2
-    echo "      libinput-dev libudev-dev libpixman-1-dev libseat-dev \\" >&2
-    echo "      libxcb1-dev libxcb-composite0-dev libxcb-icccm4-dev \\" >&2
-    echo "      libxcb-render0-dev libxcb-res0-dev libxcb-xfixes0-dev \\" >&2
-    echo "      libxcb-xinput-dev libx11-dev libx11-xcb-dev hwdata" >&2
-    die "Missing build dependencies — cannot build patched wlroots"
-fi
-
-# ─── Step 5: Configure with meson ────────────────────────────────────────────
-
-if [[ ! -f "$BUILD_DIR/build.ninja" ]] || [[ "$FORCE_REBUILD" == "true" ]]; then
+if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
     info "Configuring wlroots build with meson..."
     # wlroots 0.17.4: only -Dexamples=false is needed.
     # The wayland backend is auto-detected when wayland-client is present.
     # Do NOT pass -Dbackends=wayland — that value is not valid in 0.17.4.
     # Do NOT pass --prefix=/usr — build stays local, never installed system-wide.
-    meson setup \
+    if ! meson setup \
         --buildtype=release \
         -Dexamples=false \
         "$BUILD_DIR" \
-        "$WLROOTS_DIR" \
-        || die "meson setup failed"
+        "$WLROOTS_DIR"; then
+        # A prior interrupted setup may leave Meson metadata without a build
+        # graph. Wipe only this generated build directory and retry setup.
+        [[ -d "$BUILD_DIR/meson-private" ]] \
+            || die "meson setup failed"
+    fi
+    # Meson can return success for an already-configured directory even when
+    # an interrupted build left build.ninja missing.
+    if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
+        [[ -d "$BUILD_DIR/meson-private" ]] \
+            || die "meson setup did not create build.ninja"
+        info "Recovering incomplete Meson configuration..."
+        meson setup --wipe --buildtype=release -Dexamples=false \
+            "$BUILD_DIR" "$WLROOTS_DIR" \
+            || die "meson setup failed after recovering incomplete build"
+    fi
+    [[ -f "$BUILD_DIR/build.ninja" ]] || die "meson setup did not create build.ninja"
     info "Meson configuration complete."
+elif [[ "$FORCE_REBUILD" == "true" || "$PATCH_JUST_APPLIED" == "true" ]]; then
+    info "Refreshing wlroots Meson configuration..."
+    meson setup --reconfigure --buildtype=release -Dexamples=false "$BUILD_DIR" \
+        || die "meson reconfiguration failed"
 fi
 
-# ─── Step 6: Build ───────────────────────────────────────────────────────────
+# ─── Step 5: Build ───────────────────────────────────────────────────────────
 
 info "Building patched wlroots..."
 ninja -C "$BUILD_DIR" \
     || die "ninja build failed"
 
-# ─── Step 7: Verify output ───────────────────────────────────────────────────
+# ─── Step 6: Verify output ───────────────────────────────────────────────────
 
 if [[ ! -f "$BUILT_LIB" ]]; then
     die "Build completed but $BUILT_LIB not found — unexpected build output"
@@ -233,7 +245,7 @@ info "Build successful."
 info "  Library: $BUILT_LIB (${LIB_SIZE} bytes)"
 
 # Verify the DnD symbol is present in the built library
-if ! nm -D "$BUILT_LIB" 2>/dev/null | grep -q "wlr_wl_backend_find_by_display"; then
+if ! nm -D "$BUILT_LIB" 2>/dev/null | grep -F "wlr_wl_backend_find_by_display" >/dev/null; then
     die "Built library missing SC7Labs DnD symbol 'wlr_wl_backend_find_by_display' — patch may not have been applied"
 fi
 

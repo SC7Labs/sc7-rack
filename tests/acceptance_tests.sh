@@ -231,7 +231,60 @@ if [[ -z "$NESTED_DISP" ]]; then
     NESTED_DISP="wayland-$((${HOST_DISP##*-} + 1))"
 fi
 
-pkill -f "sc7-clipboard-bridge" 2>/dev/null || true
+# Pause only the bridge recorded by this Rack instance during the live test.
+# Restore it on exit so validation does not leave the running Rack without a
+# clipboard bridge. Never target unrelated user processes by a name pattern.
+RACK_RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/sc7-rack"
+ORIGINAL_BRIDGE_RUNNING=false
+if [[ -f "$RACK_RUN_DIR/inner_pids" ]]; then
+    while IFS= read -r cpid; do
+        [[ "$cpid" =~ ^[0-9]+$ ]] || continue
+        [[ -e "/proc/$cpid/exe" ]] || continue
+        mapfile -d '' -t bridge_args < "/proc/$cpid/cmdline" || continue
+        if [[ "$(readlink -f -- "/proc/$cpid/exe" 2>/dev/null || true)" == "$BRIDGE_BIN" &&
+              "${bridge_args[1]:-}" == "--host" && "${bridge_args[2]:-}" == "$HOST_DISP" &&
+              "${bridge_args[3]:-}" == "--nested" && "${bridge_args[4]:-}" == "$NESTED_DISP" ]]; then
+            kill -TERM "$cpid" 2>/dev/null || true
+            for ((attempt=0; attempt<20; attempt++)); do
+                kill -0 "$cpid" 2>/dev/null || break
+                sleep 0.05
+            done
+            ORIGINAL_BRIDGE_RUNNING=true
+        fi
+    done < "$RACK_RUN_DIR/inner_pids"
+fi
+restore_original_bridge() {
+    if [[ "$ORIGINAL_BRIDGE_RUNNING" == "true" && -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/$NESTED_DISP" ]]; then
+        local restored_pid
+        # Detach from the test shell's session. A backgrounded child can be
+        # reaped when the shell exits, leaving the live Rack without sharing.
+        restored_pid="$(python3 - "$BRIDGE_BIN" "$HOST_DISP" "$NESTED_DISP" "$RACK_RUN_DIR/clipboard-bridge.log" <<'PY'
+import subprocess
+import sys
+import time
+
+with open(sys.argv[4], "ab", buffering=0) as log:
+    process = subprocess.Popen(
+        [sys.argv[1], "--host", sys.argv[2], "--nested", sys.argv[3]],
+        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        start_new_session=True, close_fds=True,
+    )
+time.sleep(0.2)
+if process.poll() is not None:
+    raise SystemExit("Failed to restore Rack clipboard bridge")
+print(process.pid)
+PY
+)" || return 1
+        echo "$restored_pid" >> "$RACK_RUN_DIR/inner_pids"
+    fi
+}
+restore_on_exit() {
+    local status=$?
+    restore_original_bridge || status=1
+    trap - EXIT
+    exit "$status"
+}
+trap restore_on_exit EXIT
 "$BRIDGE_BIN" --host "$HOST_DISP" --nested "$NESTED_DISP" >/dev/null 2>&1 &
 BRIDGE_PID=$!
 sleep 0.5
@@ -325,20 +378,28 @@ LARGE_PASS="$(python3 -c "
 import subprocess, time, os
 env1 = dict(os.environ, WAYLAND_DISPLAY='$HOST_DISP')
 env2 = dict(os.environ, WAYLAND_DISPLAY='$NESTED_DISP')
-data = 'Z' * (2 * 1024 * 1024)
+data = b'Z' * (2 * 1024 * 1024)
 p = subprocess.Popen(['wl-copy', '-f'], stdin=subprocess.PIPE, env=env1)
-p.stdin.write(data.encode('utf-8'))
+p.stdin.write(data)
 p.stdin.close()
-time.sleep(0.3)
-paste = subprocess.run(['wl-paste', '-n'], capture_output=True, env=env2, timeout=5)
+deadline = time.monotonic() + 5
+received = None
+while time.monotonic() < deadline:
+    paste = subprocess.run(['wl-paste', '-n'], capture_output=True, env=env2,
+                           timeout=max(0.1, deadline - time.monotonic()))
+    received = paste.stdout
+    if paste.returncode == 0 and received == data:
+        break
+    time.sleep(0.1)
 p.terminate()
 p.wait()
-print('PASS' if len(paste.stdout) == 2 * 1024 * 1024 else 'FAIL')
+print('PASS' if received == data else
+      f'FAIL: received {len(received or b"")} bytes')
 " 2>/dev/null || echo "FAIL")"
 if [[ "$LARGE_PASS" == "PASS" ]]; then
     log_pass 28 "Large clipboard content (2MB+) streams cleanly without hanging"
 else
-    log_fail 28 "Large clipboard transfer failed or timed out"
+    log_fail 28 "Large clipboard transfer failed or timed out ($LARGE_PASS)"
 fi
 
 # Gate 29: Closing SC7 Rack terminates bridge cleanly
