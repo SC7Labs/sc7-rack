@@ -38,12 +38,79 @@ fi
 BASE_SHA="$(tr -d '[:space:]' < "$BASE_FILE")"
 [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || die "Invalid pinned Sway revision"
 SWAY_PATCH_ID="$(git patch-id --stable < "$PATCH" | awk '{print $1}')"
+# The first VM bootstrap committed the popup handlers but left the protocol
+# version change unstaged. Identify that precise intermediate source state from
+# the tracked full patch so it can be completed without accepting other edits.
+PARTIAL_PATCH_ID="$(awk '/^diff --git a\/sway\/server\.c b\/sway\/server\.c$/ { exit } { print }' "$PATCH" |
+    git patch-id --stable | awk '{print $1}')"
 WLROOTS_PATCH_ID="$(git patch-id --stable < "$ROOT/patches/wlroots-sc7labs-rack.patch" | awk '{print $1}')"
-[[ "$SWAY_PATCH_ID" =~ ^[0-9a-f]{40}$ && "$WLROOTS_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] ||
+[[ "$SWAY_PATCH_ID" =~ ^[0-9a-f]{40}$ && "$PARTIAL_PATCH_ID" =~ ^[0-9a-f]{40}$ &&
+   "$SWAY_PATCH_ID" != "$PARTIAL_PATCH_ID" && "$WLROOTS_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] ||
     die "Could not identify tracked patches"
 [[ "$(tr -d '[:space:]' < "$WLROOTS_STAMP")" == "$WLROOTS_PATCH_ID" ]] ||
     die "Rack-local wlroots build is stale; rerun ./scripts/bootstrap-wlroots.sh"
 EXPECTED_STAMP="$SWAY_PATCH_ID $WLROOTS_PATCH_ID"
+
+prepare_expected_trees() {
+    [[ -d "$SOURCE/.git" ]] || die "Sway source is not a Git checkout: $SOURCE"
+    local temporary index
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/sc7-sway-index.XXXXXXXX")" ||
+        die "Could not create a temporary Sway index"
+    index="$temporary/index"
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" read-tree "$BASE_SHA" ||
+        die "Could not read the pinned Sway tree"
+    awk '/^diff --git a\/sway\/server\.c b\/sway\/server\.c$/ { exit } { print }' "$PATCH" |
+        GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached - ||
+        die "Could not reconstruct the previous partial popup patch"
+    EXPECTED_PARTIAL_TREE="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)" ||
+        die "Could not identify the previous partial Sway tree"
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" read-tree "$BASE_SHA" ||
+        die "Could not reset the temporary Sway index"
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached "$PATCH" ||
+        die "Could not reconstruct the tracked popup patch"
+    EXPECTED_FULL_TREE="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)" ||
+        die "Could not identify the expected Sway tree"
+    rm -f -- "$index"
+    rmdir -- "$temporary"
+}
+
+staged_patch_id() {
+    git -C "$SOURCE" diff --cached --binary "$BASE_SHA" |
+        git patch-id --stable | awk '{print $1}'
+}
+
+recover_partial_popup_patch() {
+    [[ -d "$SOURCE/.git" ]] || return 0
+    git -C "$SOURCE" merge-base --is-ancestor "$BASE_SHA" HEAD || return 0
+    local current_head actual_id
+    current_head="$(git -C "$SOURCE" rev-parse HEAD)"
+    [[ "$current_head" != "$BASE_SHA" ]] || return 0
+    actual_id="$(git -C "$SOURCE" diff --binary "$BASE_SHA" HEAD |
+        git patch-id --stable | awk '{print $1}')"
+    [[ "$actual_id" == "$PARTIAL_PATCH_ID" &&
+       "$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')" == "$EXPECTED_PARTIAL_TREE" ]] || return 0
+    git -C "$SOURCE" diff --cached --quiet || return 0
+    [[ "$(git -C "$SOURCE" diff --name-only)" == sway/server.c ]] || return 0
+    [[ "$(git -C "$SOURCE" show HEAD:sway/server.c |
+        grep -c '^#define SWAY_XDG_SHELL_VERSION 2$')" == 1 ]] || return 0
+    cmp -s "$SOURCE/sway/server.c" <(
+        git -C "$SOURCE" show HEAD:sway/server.c |
+            sed 's/^#define SWAY_XDG_SHELL_VERSION 2$/#define SWAY_XDG_SHELL_VERSION 3/'
+    ) || return 0
+
+    info "Completing the interrupted authenticated popup patch..."
+    git -C "$SOURCE" add -- sway/server.c
+    [[ "$(staged_patch_id)" == "$SWAY_PATCH_ID" ]] ||
+        die "Recovered popup patch does not match the tracked patch"
+    [[ "$(git -C "$SOURCE" write-tree)" == "$EXPECTED_FULL_TREE" ]] ||
+        die "Recovered popup tree does not match the tracked patch"
+    git -C "$SOURCE" diff --quiet ||
+        die "Recovered popup patch left unstaged tracked changes"
+    git -C "$SOURCE" -c user.name='SC7 Rack build' \
+        -c user.email='build@sc7.invalid' commit --no-gpg-sign \
+        -m 'fix(xdg-shell): expose popup reposition protocol' >/dev/null ||
+        die "Could not commit recovered popup patch"
+}
 
 verify_source() {
     [[ -d "$SOURCE/.git" ]] || die "Sway source is not a Git checkout: $SOURCE"
@@ -58,7 +125,8 @@ verify_source() {
         return
     fi
     actual_id="$(git -C "$SOURCE" diff --binary "$BASE_SHA" HEAD | git patch-id --stable | awk '{print $1}')"
-    [[ "$actual_id" == "$SWAY_PATCH_ID" ]] ||
+    [[ "$actual_id" == "$SWAY_PATCH_ID" &&
+       "$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')" == "$EXPECTED_FULL_TREE" ]] ||
         die "Sway source does not match the tracked popup patch"
     SOURCE_PATCH_ID="$actual_id"
 }
@@ -74,6 +142,7 @@ verify_binary() {
 }
 
 if [[ "$CHECK_ONLY" == true ]]; then
+    prepare_expected_trees
     verify_source
     [[ "$SOURCE_PATCH_ID" == "$SWAY_PATCH_ID" ]] && verify_binary ||
         die "Rack-local Sway source or build is missing or stale"
@@ -91,11 +160,19 @@ if [[ ! -d "$SOURCE/.git" ]]; then
         die "Sway 1.9 tag does not match pinned revision"
 fi
 
+prepare_expected_trees
+recover_partial_popup_patch
 verify_source
 if [[ -z "$SOURCE_PATCH_ID" ]]; then
     git -C "$SOURCE" apply --check "$PATCH" || die "Popup patch does not apply"
     git -C "$SOURCE" apply "$PATCH"
-    git -C "$SOURCE" add -- include/sway/tree/view.h sway/desktop/xdg_shell.c
+    git -C "$SOURCE" add -- include/sway/tree/view.h sway/desktop/xdg_shell.c sway/server.c
+    [[ "$(staged_patch_id)" == "$SWAY_PATCH_ID" ]] ||
+        die "Staged popup patch does not match the tracked patch"
+    [[ "$(git -C "$SOURCE" write-tree)" == "$EXPECTED_FULL_TREE" ]] ||
+        die "Staged popup tree does not match the tracked patch"
+    git -C "$SOURCE" diff --quiet ||
+        die "Popup patch left unstaged tracked changes"
     git -C "$SOURCE" -c user.name='SC7 Rack build' \
         -c user.email='build@sc7.invalid' commit --no-gpg-sign \
         -m 'fix(xdg-shell): defer popup unconstrain until initial commit' >/dev/null ||
