@@ -21,6 +21,7 @@ RACK_RUN_DIR="$RUNTIME_DIR/sc7-rack"
 mkdir -p "$RACK_RUN_DIR"
 PID_FILE="$RACK_RUN_DIR/sc7-rack.pid"
 INNER_PIDS_FILE="$RACK_RUN_DIR/inner_pids"
+INNER_HELPER_PID_FILE="$RACK_RUN_DIR/inner_helper.pid"
 
 # Resolve real path of this script to find the repository root even via symlinks
 REAL_BIN="$(readlink -f "$0")"
@@ -75,6 +76,19 @@ get_running_rack_pid() {
     return 1
 }
 
+stop_inner_helper() {
+    local helper_pid="" helper_start="" actual_start=""
+    [[ -f "$INNER_HELPER_PID_FILE" ]] || return 0
+    read -r helper_pid helper_start < "$INNER_HELPER_PID_FILE" || true
+    if [[ "$helper_pid" =~ ^[0-9]+$ && "$helper_start" =~ ^[0-9]+$ ]]; then
+        actual_start="$(awk '{print $22}' "/proc/$helper_pid/stat" 2>/dev/null || true)"
+        if [[ "$actual_start" == "$helper_start" ]]; then
+            kill -TERM "$helper_pid" 2>/dev/null || true
+        fi
+    fi
+    rm -f "$INNER_HELPER_PID_FILE"
+}
+
 # Handle command line flags
 if [[ "${1:-}" == "--status" ]]; then
     if RUNNING_PID="$(get_running_rack_pid)"; then
@@ -97,6 +111,7 @@ elif [[ "${1:-}" == "--stop" ]]; then
         if kill -0 "$RUNNING_PID" 2>/dev/null; then
             kill -KILL "$RUNNING_PID" 2>/dev/null || true
         fi
+        stop_inner_helper
         # Terminate any tracked inner clients
         if [[ -f "$INNER_PIDS_FILE" ]]; then
             while IFS= read -r cpid; do
@@ -202,20 +217,25 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     mkdir -p "$CONFIG_DIR"
     cp "$PROJECT_ROOT/config/config" "$CONFIG_FILE"
 fi
-# Refresh older installed launch scripts that predate the Files host bridge.
-if [[ ! -f "$CONFIG_DIR/inner.sh" ]] || ! grep -q 'sc7-rack-files' "$CONFIG_DIR/inner.sh"; then
+# Keep the installed helper in step with the launcher. Otherwise an existing
+# installation keeps polling a stale Sway socket after the source is updated.
+if [[ ! -f "$CONFIG_DIR/inner.sh" ]] || ! cmp -s "$PROJECT_ROOT/config/inner.sh" "$CONFIG_DIR/inner.sh"; then
     cp "$PROJECT_ROOT/config/inner.sh" "$CONFIG_DIR/inner.sh"
     chmod +x "$CONFIG_DIR/inner.sh"
 fi
 
 # Prepare fresh inner_pids tracking file
 > "$INNER_PIDS_FILE"
+rm -f "$INNER_HELPER_PID_FILE"
 
 cleanup() {
     trap - EXIT INT TERM HUP
     echo "Shutting down SC7 Rack..." >&2
 
-    # 1. Terminate tracked inner client PIDs
+    # 1. Stop a still-running layout pass belonging to this compositor.
+    stop_inner_helper
+
+    # 2. Terminate tracked inner client PIDs
     if [[ -f "$INNER_PIDS_FILE" ]]; then
         while IFS= read -r cpid; do
             if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
@@ -233,9 +253,10 @@ cleanup() {
         fi
     fi
 
-    # 2. Terminate sway and its direct child tree
+    # 3. Terminate this Rack compositor. Its inner helper and launched clients
+    # were recorded above; avoid name/parent-pattern kills that can affect
+    # another session.
     if [[ -n "${SWAY_PID:-}" ]] && kill -0 "$SWAY_PID" 2>/dev/null; then
-        pkill -P "$SWAY_PID" 2>/dev/null || true
         kill -TERM "$SWAY_PID" 2>/dev/null || true
         sleep 0.2
         if kill -0 "$SWAY_PID" 2>/dev/null; then
@@ -243,7 +264,7 @@ cleanup() {
         fi
     fi
 
-    # 3. Clean up PID file and socket
+    # 4. Clean up PID file and socket
     rm -f "$PID_FILE"
     if [[ -n "${SWAY_PID:-}" ]]; then
         rm -f "$RUNTIME_DIR/sway-ipc."*"."$SWAY_PID".sock" 2>/dev/null || true
