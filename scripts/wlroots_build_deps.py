@@ -19,8 +19,8 @@ class Requirement:
     version: str = ""
 
 
-# Meson 0.17.4's unconditional dependencies with -Dexamples=false, plus the
-# tools used by bootstrap-wlroots.sh and the clipboard bridge build.
+# Meson 0.17.4's unconditional dependencies with -Dexamples=false, the
+# explicitly required GLES2 renderer/GBM allocator, and bootstrap/bridge tools.
 REQUIREMENTS = (
     Requirement("git", "git"),
     Requirement("meson", "meson", "tool", "0.59.0"),
@@ -37,6 +37,9 @@ REQUIREMENTS = (
     Requirement("pkg:xkbcommon", "libxkbcommon-dev", "pc"),
     Requirement("pkg:libdrm>=2.4.114", "libdrm-dev", "pc", "2.4.114"),
     Requirement("pkg:pixman-1>=0.42.0", "libpixman-1-dev", "pc", "0.42.0"),
+    Requirement("pkg:egl", "libegl-dev", "pc"),
+    Requirement("pkg:gbm>=17.1.0", "libgbm-dev", "pc", "17.1.0"),
+    Requirement("pkg:glesv2", "libgles-dev", "pc"),
 )
 BRIDGE_LABELS = {"make", "gcc", "pkg-config", "pkg:wayland-client"}
 BRIDGE_REQUIREMENTS = tuple(

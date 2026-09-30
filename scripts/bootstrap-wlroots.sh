@@ -9,7 +9,8 @@
 #   3. Verifies HEAD matches the pinned SHA BEFORE patching
 #   4. Applies patches/wlroots-sc7labs-rack.patch
 #   5. Builds libwlroots.so.12 into vendor/wlroots/build/
-#   6. Verifies the built library is present
+#   6. Verifies the built library has the DnD, Wayland, Pixman, EGL, GLES2,
+#      and GBM capabilities Rack needs
 #
 # Safety guarantees:
 #   - System wlroots (/usr/lib/libwlroots*) is NEVER modified
@@ -78,6 +79,26 @@ verify_patched_source() {
         || die "wlroots changes do not match the tracked SC7Labs patch"
 }
 
+verify_library_features() {
+    local symbols symbol
+    symbols="$(nm -D "$BUILT_LIB" 2>/dev/null)" || return 1
+    # These exported functions come from distinct wlroots source units. Their
+    # presence proves the configured renderer/backend code reached the library,
+    # rather than merely finding an old .so with the DnD patch.
+    for symbol in \
+        wlr_wl_backend_find_by_display \
+        wlr_wl_backend_create \
+        wlr_pixman_renderer_create \
+        wlr_egl_create_with_context \
+        wlr_gles2_renderer_create \
+        wlr_gbm_allocator_create; do
+        if ! grep -E "[[:space:]][TtWw][[:space:]]${symbol}$" <<< "$symbols" >/dev/null; then
+            info "Missing required wlroots capability: $symbol"
+            return 1
+        fi
+    done
+}
+
 # ─── Step 0: Validate source files ───────────────────────────────────────────
 
 [[ -f "$BASE_REV_FILE" ]] || die "Missing: $BASE_REV_FILE"
@@ -110,13 +131,12 @@ if [[ "$FORCE_REBUILD" == "false" && -f "$BUILT_LIB" ]]; then
     [[ -d "$WLROOTS_DIR/.git" ]] \
         || die "Built library exists without a verifiable wlroots Git checkout"
     verify_patched_source
-    if command -v nm >/dev/null 2>&1 &&
-       nm -D "$BUILT_LIB" 2>/dev/null | grep -F "wlr_wl_backend_find_by_display" >/dev/null; then
+    if command -v nm >/dev/null 2>&1 && verify_library_features; then
         info "Verified patched build already present — skipping rebuild."
         info "  Built library: $BUILT_LIB"
         exit 0
     fi
-    info "Existing library cannot be verified — rebuilding."
+    info "Existing library lacks required features or cannot be verified — reconfiguring and rebuilding."
 fi
 
 # Check/install build inputs before cloning or changing the wlroots checkout.
@@ -159,7 +179,6 @@ fi
 
 CURRENT_HEAD="$(git -C "$WLROOTS_DIR" rev-parse HEAD)"
 CURRENT_BRANCH="$(git -C "$WLROOTS_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")"
-PATCH_JUST_APPLIED=false
 
 info "Current wlroots HEAD:   $CURRENT_HEAD (branch: $CURRENT_BRANCH)"
 
@@ -189,20 +208,22 @@ else
 
     info "Patch applied and committed."
     verify_patched_source
-    PATCH_JUST_APPLIED=true
 fi
 
 # ─── Step 4: Configure with Meson ─────────────────────────────────────────────
 
 if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
     info "Configuring wlroots build with meson..."
-    # wlroots 0.17.4: only -Dexamples=false is needed.
-    # The wayland backend is auto-detected when wayland-client is present.
+    # wlroots 0.17.4 builds the nested Wayland backend and Pixman renderer
+    # unconditionally. Require the GLES2 renderer and GBM allocator so Meson
+    # fails instead of silently producing a software-only library.
     # Do NOT pass -Dbackends=wayland — that value is not valid in 0.17.4.
     # Do NOT pass --prefix=/usr — build stays local, never installed system-wide.
     if ! meson setup \
         --buildtype=release \
         -Dexamples=false \
+        -Drenderers=gles2 \
+        -Dallocators=gbm \
         "$BUILD_DIR" \
         "$WLROOTS_DIR"; then
         # A prior interrupted setup may leave Meson metadata without a build
@@ -217,15 +238,21 @@ if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
             || die "meson setup did not create build.ninja"
         info "Recovering incomplete Meson configuration..."
         meson setup --wipe --buildtype=release -Dexamples=false \
+            -Drenderers=gles2 -Dallocators=gbm \
             "$BUILD_DIR" "$WLROOTS_DIR" \
             || die "meson setup failed after recovering incomplete build"
     fi
     [[ -f "$BUILD_DIR/build.ninja" ]] || die "meson setup did not create build.ninja"
     info "Meson configuration complete."
-elif [[ "$FORCE_REBUILD" == "true" || "$PATCH_JUST_APPLIED" == "true" ]]; then
-    info "Refreshing wlroots Meson configuration..."
-    meson setup --reconfigure --buildtype=release -Dexamples=false "$BUILD_DIR" \
-        || die "meson reconfiguration failed"
+else
+    # An old build graph can exist with an incomplete renderer even when
+    # libwlroots.so.12 is absent (an interrupted Ninja build). Wipe only
+    # generated Meson output for every rebuild so newly installed EGL/GBM/
+    # GLES2 packages are probed afresh. The patched source is preserved.
+    info "Refreshing wlroots Meson configuration with fresh dependency probes..."
+    meson setup --wipe --buildtype=release -Dexamples=false \
+        -Drenderers=gles2 -Dallocators=gbm "$BUILD_DIR" "$WLROOTS_DIR" \
+        || die "meson setup failed while refreshing renderer features"
 fi
 
 # ─── Step 5: Build ───────────────────────────────────────────────────────────
@@ -244,12 +271,12 @@ LIB_SIZE="$(stat -c%s "$BUILT_LIB")"
 info "Build successful."
 info "  Library: $BUILT_LIB (${LIB_SIZE} bytes)"
 
-# Verify the DnD symbol is present in the built library
-if ! nm -D "$BUILT_LIB" 2>/dev/null | grep -F "wlr_wl_backend_find_by_display" >/dev/null; then
-    die "Built library missing SC7Labs DnD symbol 'wlr_wl_backend_find_by_display' — patch may not have been applied"
+# Verify all runtime-critical renderer/backend functions in the final library.
+if ! verify_library_features; then
+    die "Built library is missing required Wayland, Pixman, EGL, GLES2, GBM, or SC7Labs DnD features"
 fi
 
-info "  DnD symbol verified in built library."
+info "  DnD, Wayland, Pixman, EGL, GLES2, and GBM capabilities verified."
 info ""
 info "SC7Labs patched wlroots is ready."
 info "Launcher uses: LD_LIBRARY_PATH=$BUILD_DIR"

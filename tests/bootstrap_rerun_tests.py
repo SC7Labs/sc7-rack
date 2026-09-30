@@ -77,7 +77,7 @@ from pathlib import Path
 import sys
 with open(os.environ['SC7_TEST_COMMAND_LOG'], 'a', encoding='utf-8') as log:
     log.write('meson ' + ' '.join(sys.argv[1:]) + '\\n')
-build = Path(sys.argv[-2])
+build = Path(sys.argv[-1] if '--reconfigure' in sys.argv else sys.argv[-2])
 if (build / 'meson-private/SC7_TEST_FAIL_FIRST').exists() and '--wipe' not in sys.argv:
     sys.exit(2)
 if (build / 'meson-private/SC7_TEST_NO_GRAPH').exists() and '--wipe' not in sys.argv:
@@ -94,15 +94,24 @@ import sys
 with open(os.environ['SC7_TEST_COMMAND_LOG'], 'a', encoding='utf-8') as log:
     log.write('ninja ' + ' '.join(sys.argv[1:]) + '\\n')
 build = Path(sys.argv[sys.argv.index('-C') + 1])
-(build / 'libwlroots.so.12').write_text('valid-symbol\\n', encoding='utf-8')
+(build / 'libwlroots.so.12').write_text(
+    'valid-symbol full-renderer\\n' if not os.getenv('SC7_TEST_RENDERERLESS_BUILD')
+    else 'valid-symbol\\n', encoding='utf-8')
 """,
         )
         executable(
             self.fake_bin / "nm",
             """from pathlib import Path
 import sys
-if 'valid-symbol' in Path(sys.argv[-1]).read_text(encoding='utf-8'):
-    print('0000000000000000 T wlr_wl_backend_find_by_display')
+library = Path(sys.argv[-1]).read_text(encoding='utf-8')
+if 'valid-symbol' in library:
+    for name in ('wlr_wl_backend_find_by_display', 'wlr_wl_backend_create',
+                 'wlr_pixman_renderer_create'):
+        print('0000000000000000 T ' + name)
+if 'full-renderer' in library:
+    for name in ('wlr_egl_create_with_context', 'wlr_gles2_renderer_create',
+                 'wlr_gbm_allocator_create'):
+        print('0000000000000000 T ' + name)
 """,
         )
         executable(self.fake_bin / "pkg-config", "import sys\nsys.exit(0)\n")
@@ -164,6 +173,10 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertNotIn("Applying SC7Labs patch", result.stdout)
         self.assertTrue((self.wlroots / "build/libwlroots.so.12").is_file())
         self.assertTrue(any(command.startswith("meson ") for command in self.commands()))
+        self.assertTrue(any(
+            "-Drenderers=gles2" in command and "-Dallocators=gbm" in command
+            for command in self.commands() if command.startswith("meson ")
+        ))
         self.assertTrue(any(command.startswith("ninja ") for command in self.commands()))
         self.assertLess(
             next(i for i, command in enumerate(self.commands()) if command == "build-deps --check"),
@@ -207,7 +220,8 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
                 any(command.startswith("ninja ") for command in self.commands()),
                 result.stdout + result.stderr,
             )
-            self.assertEqual(library.read_text(encoding="utf-8"), "valid-symbol\n")
+            self.assertEqual(library.read_text(encoding="utf-8"),
+                             "valid-symbol full-renderer\n")
         else:
             self.assertNotIn("skipping rebuild", result.stdout.lower())
             self.assertRegex(result.stdout + result.stderr, r"(?i)library|symbol|cache")
@@ -222,6 +236,74 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             commands.index("build-deps --ensure"),
             next(i for i, command in enumerate(commands) if command.startswith("meson ")),
         )
+
+    def test_rendererless_cache_reconfigures_after_installing_dependencies(self) -> None:
+        patched_sha = self.commit_patch()
+        build = self.wlroots / "build"
+        build.mkdir()
+        (build / "build.ninja").write_text("old graph\n", encoding="utf-8")
+        library = build / "libwlroots.so.12"
+        library.write_text("valid-symbol\n", encoding="utf-8")
+
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("wlr_egl_create_with_context", result.stdout)
+        self.assertIn("reconfiguring and rebuilding", result.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), patched_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertEqual(library.read_text(encoding="utf-8"),
+                         "valid-symbol full-renderer\n")
+        commands = self.commands()
+        self.assertIn("build-deps --ensure", commands)
+        refresh = next(command for command in commands
+                       if command.startswith("meson setup --wipe"))
+        self.assertIn("-Drenderers=gles2", refresh)
+        self.assertIn("-Dallocators=gbm", refresh)
+        self.assertLess(commands.index("build-deps --ensure"), commands.index(refresh))
+        self.assertFalse(any(command.startswith("blocked-network-git ")
+                             for command in commands))
+
+        # A successful rebuild is accepted as a cache on the following run.
+        second = self.run_bootstrap("--install-deps")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.commands(), commands)
+
+    def test_old_build_graph_without_library_redetects_renderer_inputs(self) -> None:
+        self.commit_patch()
+        build = self.wlroots / "build"
+        build.mkdir()
+        (build / "build.ninja").write_text("old rendererless graph\n", encoding="utf-8")
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = self.commands()
+        refresh = next(command for command in commands
+                       if command.startswith("meson setup --wipe"))
+        self.assertIn("-Drenderers=gles2", refresh)
+        self.assertIn("-Dallocators=gbm", refresh)
+        self.assertLess(commands.index("build-deps --ensure"), commands.index(refresh))
+        self.assertTrue((build / "libwlroots.so.12").is_file())
+        self.assertFalse(any(command.startswith("blocked-network-git ")
+                             for command in commands))
+
+    def test_force_rebuild_refreshes_renderer_dependency_cache(self) -> None:
+        self.commit_patch()
+        first = self.run_bootstrap()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        before = self.commands()
+        forced = self.run_bootstrap("--force-rebuild")
+        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+        added = self.commands()[len(before):]
+        self.assertTrue(any(command.startswith("meson setup --wipe")
+                            for command in added))
+        self.assertTrue(any(command.startswith("ninja ") for command in added))
+
+    def test_missing_renderer_after_build_is_a_hard_failure(self) -> None:
+        self.commit_patch()
+        self.env["SC7_TEST_RENDERERLESS_BUILD"] = "1"
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("wlr_egl_create_with_context", result.stdout)
+        self.assertIn("missing required Wayland, Pixman, EGL, GLES2, GBM", result.stderr)
 
     def test_interrupted_meson_configuration_is_recovered(self) -> None:
         self.commit_patch()

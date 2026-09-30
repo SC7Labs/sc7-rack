@@ -71,6 +71,32 @@ class BuildDependencyTests(unittest.TestCase):
             ["meson", "ninja-build", "wayland-protocols", "libxkbcommon-dev"],
         )
 
+    def test_required_renderer_inputs_map_to_actual_pkg_config_providers(self):
+        renderer = [requirement("pkg:egl"), requirement("pkg:gbm>=17.1.0"),
+                    requirement("pkg:glesv2")]
+        self.assertEqual(
+            deps.apt_packages(renderer), ["libegl-dev", "libgbm-dev", "libgles-dev"]
+        )
+        self.assertEqual(renderer[1].version, "17.1.0")
+
+        queried = []
+
+        def fake_run(command, **_kwargs):
+            queried.append(command)
+            if command == ["meson", "--version"]:
+                return subprocess.CompletedProcess(command, 0, stdout="1.0.0\n")
+            return subprocess.CompletedProcess(command, 1 if command in (
+                ["pkg-config", "--exists", "egl"],
+                ["pkg-config", "--atleast-version=17.1.0", "gbm"],
+                ["pkg-config", "--exists", "glesv2"],
+            ) else 0)
+
+        with mock.patch.object(deps.shutil, "which", return_value="/fake/tool"), \
+             mock.patch.object(deps.subprocess, "run", side_effect=fake_run):
+            missing = deps.missing_requirements()
+        self.assertEqual(missing, renderer)
+        self.assertIn(["pkg-config", "--atleast-version=17.1.0", "gbm"], queried)
+
     def test_missing_tools_and_old_pkg_config_versions_are_detected(self):
         absent_tools = {"meson", "ninja"}
         queried = []
@@ -91,7 +117,7 @@ class BuildDependencyTests(unittest.TestCase):
             [item.label for item in missing],
             ["meson", "ninja", "pkg:wayland-server>=1.22",
              "pkg:wayland-protocols>=1.32", "pkg:libdrm>=2.4.114",
-             "pkg:pixman-1>=0.42.0"],
+             "pkg:pixman-1>=0.42.0", "pkg:gbm>=17.1.0"],
         )
         self.assertIn(
             ["pkg-config", "--atleast-version=1.22", "wayland-server"], queried
