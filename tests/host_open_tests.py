@@ -62,7 +62,7 @@ keys = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK", "I3SOCK", "PATH",
         "LD_LIBRARY_PATH", "WLR_BACKENDS", "WLR_LIBINPUT_NO_DEVICES",
         "WAYLAND_SOCKET", "XDG_ACTIVATION_TOKEN")
-record = {"argv": sys.argv[1:],
+record = {"pid": os.getpid(), "argv": sys.argv[1:],
           "env": {key: os.environ[key] for key in keys if key in os.environ}}
 with open(os.environ["SC7_TEST_OPEN_CAPTURE"], "a", encoding="utf-8") as output:
     output.write(json.dumps(record, ensure_ascii=False) + "\\n")
@@ -130,7 +130,7 @@ subprocess.run(["arbitrary-mime-viewer", *sys.argv[1:]], check=True)
 import os
 import sys
 
-record = {"argv": sys.argv[1:], "env": dict(os.environ)}
+record = {"pid": os.getpid(), "argv": sys.argv[1:], "env": dict(os.environ)}
 with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
     json.dump(record, output)
 """,
@@ -242,6 +242,30 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
                 return records
             time.sleep(0.02)
         self.fail(f"Expected {count} host opener calls, got {read_json_lines(self.open_capture)}")
+
+    def fixture_processes(self):
+        """Find only helpers launched from this test's private executable paths."""
+        names = (str(self.host_opener), str(self.host_bin / "arbitrary-mime-viewer"))
+        running = set()
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                arguments = entry.joinpath("cmdline").read_bytes().split(b"\0")
+            except (OSError, PermissionError):
+                continue
+            if any(os.fsencode(name) in arguments for name in names):
+                running.add(int(entry.name))
+        return running
+
+    def wait_for_fixture_processes_to_exit(self):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            running = self.fixture_processes()
+            if not running:
+                return
+            time.sleep(0.02)
+        self.fail(f"Host-open test helpers did not exit: {sorted(running)}")
 
     def test_launcher_preserves_host_environment_and_scopes_private_path(self):
         expected = {
@@ -413,6 +437,52 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
                 self.assertNotEqual(result.returncode, 0, label)
                 self.assertFalse(self.files_capture.exists(), label)
                 self.assertFalse(self.mime_capture.exists(), label)
+
+    def test_repeated_host_open_and_direct_mime_launches_leave_no_helpers(self):
+        """Exercise 100 cycles of both launch paths and verify session isolation."""
+        nested_socket = self.nested_runtime / self.nested_env["WAYLAND_DISPLAY"]
+        nested_socket.unlink(missing_ok=True)
+        document = self.home / "long run test.md"
+        document.write_text("test", encoding="utf-8")
+        expected_uris = [f"https://example.test/host-open/{i}" for i in range(100)]
+
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(nested_socket))
+                listener.listen(1)
+                listener.settimeout(5)
+                for i, uri in enumerate(expected_uris):
+                    result = self.invoke([uri])
+                    self.assertEqual(result.returncode, 0, (i, result.stderr))
+
+                    result = self.invoke([document], executable=FILES_BRIDGE)
+                    self.assertEqual(result.returncode, 0, (i, result.stderr))
+                    with listener.accept()[0] as connection:
+                        self.assertEqual(
+                            connection.recv(128), b"files-connected-to-nested-wayland"
+                        )
+
+                    files = json.loads(self.files_capture.read_text(encoding="utf-8"))
+                    mime = json.loads(self.mime_capture.read_text(encoding="utf-8"))
+                    self.assertEqual(files["argv"], [str(document)])
+                    self.assertEqual(mime["argv"], [str(document)])
+                    self.assertEqual(files["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
+                    self.assertEqual(mime["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
+                    self.assertEqual(int(files["env"]["WAYLAND_SOCKET"]), files["socket_fd"])
+                    self.assertNotIn("WAYLAND_SOCKET", mime["env"])
+                    self.assertEqual(mime["env"].get("DBUS_SESSION_BUS_ADDRESS"), self.host_bus)
+        except PermissionError as error:
+            if error.errno == errno.EPERM:
+                self.skipTest("sandbox forbids local UNIX socket listeners")
+            raise
+
+        records = self.wait_for_records(100)
+        self.assertEqual(sorted(record["argv"][0] for record in records), sorted(expected_uris))
+        for record in records:
+            self.assertEqual(record["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
+            self.assertEqual(record["env"].get("DBUS_SESSION_BUS_ADDRESS"), self.host_bus)
+            self.assertNotIn("WAYLAND_SOCKET", record["env"])
+        self.wait_for_fixture_processes_to_exit()
 
 
 if __name__ == "__main__":
