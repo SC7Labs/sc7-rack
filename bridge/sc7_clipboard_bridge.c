@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/random.h>
 #include <pthread.h>
 #include <wayland-client.h>
 #include "wlr-data-control-unstable-v1-client-protocol.h"
@@ -21,6 +22,9 @@ static void sigint_handler(int sig) {
 }
 
 #define MAX_MIMES 128
+#define OWNER_MIME_PREFIX "application/x-sc7-rack-clipboard-bridge-"
+#define OWNER_MIME_RANDOM_BYTES 16
+#define OWNER_MIME_CAPACITY (sizeof(OWNER_MIME_PREFIX) + OWNER_MIME_RANDOM_BYTES * 2)
 
 struct mime_list {
     char *types[MAX_MIMES];
@@ -40,7 +44,9 @@ static void mime_list_add(struct mime_list *l, const char *type) {
     for (size_t i = 0; i < l->count; i++) {
         if (strcmp(l->types[i], type) == 0) return;
     }
-    l->types[l->count++] = strdup(type);
+    char *copy = strdup(type);
+    if (!copy) return;
+    l->types[l->count++] = copy;
 }
 
 static bool mime_list_has(const struct mime_list *l, const char *type) {
@@ -61,11 +67,23 @@ static const char *find_matching_text_mime(const struct mime_list *l) {
 
 struct bridge_endpoint;
 
+struct pending_owner_marker {
+    char mime[OWNER_MIME_CAPACITY];
+    struct zwlr_data_control_source_v1 *source;
+    struct bridge_endpoint *endpoint;
+    struct wl_callback *cleanup_sync;
+    struct pending_owner_marker *next;
+    bool is_primary;
+    bool linked;
+};
+
 struct offer_info {
     struct zwlr_data_control_offer_v1 *offer;
     struct mime_list mimes;
     struct bridge_endpoint *endpoint;
     bool is_primary;
+    char own_regular_marker[OWNER_MIME_CAPACITY];
+    char own_primary_marker[OWNER_MIME_CAPACITY];
 };
 
 struct bridge_endpoint {
@@ -80,24 +98,151 @@ struct bridge_endpoint {
     // Regular selection
     struct zwlr_data_control_source_v1 *our_source;
     struct offer_info *current_offer;
-    int pending_our_selections;
     bool is_our_offer;
 
     // Primary selection
     struct zwlr_data_control_source_v1 *our_primary_source;
     struct offer_info *current_primary_offer;
-    int pending_our_primary_selections;
     bool is_our_primary_offer;
+
+    struct pending_owner_marker *pending_markers;
 
     struct bridge_endpoint *peer;
     bool ready;
     bool debug;
 };
 
+static bool is_owner_marker(const char *type) {
+    return strncmp(type, OWNER_MIME_PREFIX, sizeof(OWNER_MIME_PREFIX) - 1) == 0;
+}
+
+static int generate_owner_mime(char *out, size_t capacity) {
+    unsigned char random_bytes[OWNER_MIME_RANDOM_BYTES];
+    size_t got = 0;
+    while (got < sizeof(random_bytes)) {
+        ssize_t n = getrandom(random_bytes + got, sizeof(random_bytes) - got, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        got += (size_t)n;
+    }
+
+    int pos = snprintf(out, capacity, "%s", OWNER_MIME_PREFIX);
+    if (pos < 0 || (size_t)pos + sizeof(random_bytes) * 2 >= capacity) return -1;
+    for (size_t i = 0; i < sizeof(random_bytes); i++) {
+        snprintf(out + pos + i * 2, capacity - (size_t)pos - i * 2,
+                 "%02x", random_bytes[i]);
+    }
+    return 0;
+}
+
+static struct pending_owner_marker *find_pending_marker(
+        struct bridge_endpoint *ep, const char *mime, bool is_primary) {
+    for (struct pending_owner_marker *marker = ep->pending_markers;
+         marker; marker = marker->next) {
+        if (marker->is_primary == is_primary && strcmp(marker->mime, mime) == 0) {
+            return marker;
+        }
+    }
+    return NULL;
+}
+
+static struct pending_owner_marker *find_pending_source(
+        struct bridge_endpoint *ep, struct zwlr_data_control_source_v1 *source) {
+    for (struct pending_owner_marker *marker = ep->pending_markers;
+         marker; marker = marker->next) {
+        if (marker->source == source) return marker;
+    }
+    return NULL;
+}
+
+static void unlink_pending_marker(struct pending_owner_marker *marker) {
+    if (!marker->linked) return;
+    struct pending_owner_marker **cursor = &marker->endpoint->pending_markers;
+    while (*cursor && *cursor != marker) cursor = &(*cursor)->next;
+    if (*cursor) *cursor = marker->next;
+    marker->linked = false;
+    marker->next = NULL;
+}
+
+static void marker_sync_done(void *data, struct wl_callback *callback, uint32_t serial) {
+    (void)serial;
+    struct pending_owner_marker *marker = data;
+    unlink_pending_marker(marker);
+    wl_callback_destroy(callback);
+    free(marker);
+}
+
+static const struct wl_callback_listener marker_sync_listener = {
+    .done = marker_sync_done,
+};
+
+static void retire_pending_source(struct bridge_endpoint *ep,
+                                  struct zwlr_data_control_source_v1 *source) {
+    struct pending_owner_marker *marker = find_pending_source(ep, source);
+    if (!marker || marker->cleanup_sync) return;
+
+    // A queued echo can arrive after we destroy its source. Keep the marker
+    // until the server processes all requests preceding this sync callback.
+    struct wl_callback *sync = wl_display_sync(ep->display);
+    if (!sync || wl_callback_add_listener(sync, &marker_sync_listener, marker) != 0) {
+        if (sync) wl_callback_destroy(sync);
+        unlink_pending_marker(marker);
+        free(marker);
+        return;
+    }
+    marker->cleanup_sync = sync;
+}
+
+static struct pending_owner_marker *track_pending_source(
+        struct bridge_endpoint *ep, struct zwlr_data_control_source_v1 *source,
+        bool is_primary) {
+    struct pending_owner_marker *marker = calloc(1, sizeof(*marker));
+    if (!marker) return NULL;
+    if (generate_owner_mime(marker->mime, sizeof(marker->mime)) != 0) {
+        free(marker);
+        return NULL;
+    }
+    marker->source = source;
+    marker->endpoint = ep;
+    marker->is_primary = is_primary;
+    marker->linked = true;
+    marker->next = ep->pending_markers;
+    ep->pending_markers = marker;
+    return marker;
+}
+
+static void consume_pending_marker(struct pending_owner_marker *marker) {
+    unlink_pending_marker(marker);
+    if (!marker->cleanup_sync) free(marker);
+}
+
+static void destroy_owned_source(struct bridge_endpoint *ep,
+                                 struct zwlr_data_control_source_v1 *source) {
+    zwlr_data_control_source_v1_destroy(source);
+    retire_pending_source(ep, source);
+}
+
+static void offer_info_destroy(struct offer_info *info) {
+    if (!info) return;
+    zwlr_data_control_offer_v1_destroy(info->offer);
+    mime_list_clear(&info->mimes);
+    free(info);
+}
+
 static void offer_handle_offer(void *data, struct zwlr_data_control_offer_v1 *offer, const char *mime_type) {
     (void)offer;
     struct offer_info *info = data;
     if (info) {
+        // Preserve ownership identity even when MAX_MIMES ordinary MIME slots
+        // are full. The bridge marker is deliberately advertised last.
+        if (is_owner_marker(mime_type)) {
+            struct pending_owner_marker *regular =
+                find_pending_marker(info->endpoint, mime_type, false);
+            struct pending_owner_marker *primary =
+                find_pending_marker(info->endpoint, mime_type, true);
+            if (regular) strcpy(info->own_regular_marker, regular->mime);
+            if (primary) strcpy(info->own_primary_marker, primary->mime);
+        }
         mime_list_add(&info->mimes, mime_type);
     }
 }
@@ -180,6 +325,31 @@ static void *convert_worker(void *arg) {
     return NULL;
 }
 
+static bool start_convert_worker(int read_fd, int write_fd, bool is_uri_to_text) {
+    struct uri_to_text_ctx *ctx = malloc(sizeof(*ctx));
+    if (!ctx) return false;
+    ctx->read_fd = read_fd;
+    ctx->write_fd = write_fd;
+    ctx->is_uri_to_text = is_uri_to_text;
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        free(ctx);
+        return false;
+    }
+    int err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (err == 0) {
+        pthread_t th;
+        err = pthread_create(&th, &attr, convert_worker, ctx);
+    }
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
+        free(ctx);
+        return false;
+    }
+    return true;
+}
+
 static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *source,
                                const char *mime_type, int32_t fd) {
     struct bridge_endpoint *ep = data;
@@ -189,6 +359,13 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
     if (ep->debug) {
         fprintf(stderr, "[%s] send request for MIME '%s' (fd=%d, primary=%d, peer_offer=%p)\n",
                 ep->name, mime_type, fd, is_primary, (void*)peer_offer);
+    }
+
+    // The marker is only an ownership signal. Never transfer clipboard data
+    // under that private MIME type, including through the text fallback.
+    if (is_owner_marker(mime_type)) {
+        close(fd);
+        return;
     }
 
     if (!peer_offer || !peer_offer->offer) {
@@ -216,13 +393,12 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
         mime_list_has(&peer_offer->mimes, "text/uri-list")) {
         int p[2];
         if (pipe(p) == 0) {
-            struct uri_to_text_ctx *ctx = malloc(sizeof(*ctx));
-            ctx->read_fd = p[0];
-            ctx->write_fd = fd;
-            ctx->is_uri_to_text = true;
-            pthread_t th;
-            pthread_create(&th, NULL, convert_worker, ctx);
-            pthread_detach(th);
+            if (!start_convert_worker(p[0], fd, true)) {
+                close(p[0]);
+                close(p[1]);
+                close(fd);
+                return;
+            }
 
             zwlr_data_control_offer_v1_receive(peer_offer->offer, "text/uri-list", p[1]);
             while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
@@ -240,13 +416,12 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
         if (alt) {
             int p[2];
             if (pipe(p) == 0) {
-                struct uri_to_text_ctx *ctx = malloc(sizeof(*ctx));
-                ctx->read_fd = p[0];
-                ctx->write_fd = fd;
-                ctx->is_uri_to_text = false;
-                pthread_t th;
-                pthread_create(&th, NULL, convert_worker, ctx);
-                pthread_detach(th);
+                if (!start_convert_worker(p[0], fd, false)) {
+                    close(p[0]);
+                    close(p[1]);
+                    close(fd);
+                    return;
+                }
 
                 zwlr_data_control_offer_v1_receive(peer_offer->offer, alt, p[1]);
                 while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
@@ -280,14 +455,13 @@ static void source_handle_cancelled(void *data, struct zwlr_data_control_source_
         fprintf(stderr, "[%s] source cancelled: %p\n", ep->name, (void*)source);
     }
     if (source == ep->our_source) {
-        zwlr_data_control_source_v1_destroy(ep->our_source);
         ep->our_source = NULL;
         ep->is_our_offer = false;
     } else if (source == ep->our_primary_source) {
-        zwlr_data_control_source_v1_destroy(ep->our_primary_source);
         ep->our_primary_source = NULL;
         ep->is_our_primary_offer = false;
     }
+    destroy_owned_source(ep, source);
 }
 
 static const struct zwlr_data_control_source_v1_listener source_listener = {
@@ -297,7 +471,11 @@ static const struct zwlr_data_control_source_v1_listener source_listener = {
 
 static void offer_all_synthesized_mimes(struct zwlr_data_control_source_v1 *source, struct offer_info *src_offer) {
     for (size_t i = 0; i < src_offer->mimes.count; i++) {
-        zwlr_data_control_source_v1_offer(source, src_offer->mimes.types[i]);
+        // Markers identify bridge-owned selections. Never forward one from
+        // an observed offer to the other display.
+        if (!is_owner_marker(src_offer->mimes.types[i])) {
+            zwlr_data_control_source_v1_offer(source, src_offer->mimes.types[i]);
+        }
     }
 
     if (mime_list_has(&src_offer->mimes, "text/uri-list")) {
@@ -350,35 +528,71 @@ static void propagate_selection(struct bridge_endpoint *src_ep, bool is_primary)
 
     if (is_primary) {
         if (dst_ep->our_primary_source) {
-            zwlr_data_control_source_v1_destroy(dst_ep->our_primary_source);
+            destroy_owned_source(dst_ep, dst_ep->our_primary_source);
             dst_ep->our_primary_source = NULL;
         }
 
         struct zwlr_data_control_source_v1 *source =
             zwlr_data_control_manager_v1_create_data_source(dst_ep->manager);
+        if (!source) return;
+        struct pending_owner_marker *marker =
+            track_pending_source(dst_ep, source, true);
+        if (!marker) {
+            zwlr_data_control_source_v1_destroy(source);
+            return;
+        }
         dst_ep->our_primary_source = source;
         zwlr_data_control_source_v1_add_listener(source, &source_listener, dst_ep);
 
         offer_all_synthesized_mimes(source, src_offer);
+        zwlr_data_control_source_v1_offer(source, marker->mime);
 
-        dst_ep->pending_our_primary_selections++;
         zwlr_data_control_device_v1_set_primary_selection(dst_ep->device, source);
         wl_display_flush(dst_ep->display);
     } else {
         if (dst_ep->our_source) {
-            zwlr_data_control_source_v1_destroy(dst_ep->our_source);
+            destroy_owned_source(dst_ep, dst_ep->our_source);
             dst_ep->our_source = NULL;
         }
 
         struct zwlr_data_control_source_v1 *source =
             zwlr_data_control_manager_v1_create_data_source(dst_ep->manager);
+        if (!source) return;
+        struct pending_owner_marker *marker =
+            track_pending_source(dst_ep, source, false);
+        if (!marker) {
+            zwlr_data_control_source_v1_destroy(source);
+            return;
+        }
         dst_ep->our_source = source;
         zwlr_data_control_source_v1_add_listener(source, &source_listener, dst_ep);
 
         offer_all_synthesized_mimes(source, src_offer);
+        zwlr_data_control_source_v1_offer(source, marker->mime);
 
-        dst_ep->pending_our_selections++;
         zwlr_data_control_device_v1_set_selection(dst_ep->device, source);
+        wl_display_flush(dst_ep->display);
+    }
+}
+
+static void revoke_mirrored_selection(struct bridge_endpoint *src_ep, bool is_primary) {
+    struct bridge_endpoint *dst_ep = src_ep->peer;
+    if (!dst_ep) return;
+
+    // Destroy only the source we created. If it is still the compositor's
+    // selection, the compositor clears it; if another client replaced it,
+    // that client's selection is left untouched. Do not send set_selection
+    // with NULL, which could erase a newer selection on the other display.
+    struct zwlr_data_control_source_v1 **source = is_primary ?
+        &dst_ep->our_primary_source : &dst_ep->our_source;
+    if (*source) {
+        destroy_owned_source(dst_ep, *source);
+        *source = NULL;
+        if (is_primary) {
+            dst_ep->is_our_primary_offer = false;
+        } else {
+            dst_ep->is_our_offer = false;
+        }
         wl_display_flush(dst_ep->display);
     }
 }
@@ -388,6 +602,12 @@ static void device_handle_data_offer(void *data, struct zwlr_data_control_device
     (void)device;
     struct bridge_endpoint *ep = data;
     struct offer_info *info = calloc(1, sizeof(*info));
+    if (!info) {
+        // Keep the proxy dispatchable. The selection callback will destroy
+        // this untracked offer without trying to use or forward it.
+        zwlr_data_control_offer_v1_add_listener(offer, &offer_listener, NULL);
+        return;
+    }
     info->offer = offer;
     info->endpoint = ep;
     zwlr_data_control_offer_v1_set_user_data(offer, info);
@@ -399,31 +619,41 @@ static void device_handle_selection(void *data, struct zwlr_data_control_device_
     (void)device;
     struct bridge_endpoint *ep = data;
     if (ep->debug) {
-        fprintf(stderr, "[%s] selection event: offer=%p, pending_our=%d\n",
-                ep->name, (void*)offer, ep->pending_our_selections);
+        fprintf(stderr, "[%s] selection event: offer=%p\n", ep->name, (void*)offer);
     }
 
-    if (offer == NULL) {
+    struct offer_info *info = offer ? zwlr_data_control_offer_v1_get_user_data(offer) : NULL;
+    if (offer && !info &&
+        (!ep->current_offer || ep->current_offer->offer != offer)) {
+        zwlr_data_control_offer_v1_destroy(offer);
+    }
+
+    // Each selection event invalidates the previous offer, including an echo
+    // of our own source and a NULL selection. The protocol requires clients
+    // to destroy that offer before using the new one.
+    if (ep->current_offer && ep->current_offer != info) {
+        offer_info_destroy(ep->current_offer);
+    }
+    ep->current_offer = NULL;
+
+    if (!info) {
+        ep->is_our_offer = false;
+        revoke_mirrored_selection(ep, false);
         return;
     }
 
-    struct offer_info *info = zwlr_data_control_offer_v1_get_user_data(offer);
-    if (!info) return;
-
-    if (ep->pending_our_selections > 0) {
-        ep->pending_our_selections--;
+    struct pending_owner_marker *marker = info->own_regular_marker[0] ?
+        find_pending_marker(ep, info->own_regular_marker, false) : NULL;
+    if (marker) {
+        consume_pending_marker(marker);
         ep->is_our_offer = true;
+        offer_info_destroy(info);
         if (ep->debug) {
             fprintf(stderr, "[%s] Ignored echo of our own selection\n", ep->name);
         }
         return;
     }
 
-    if (ep->current_offer && ep->current_offer != info) {
-        zwlr_data_control_offer_v1_destroy(ep->current_offer->offer);
-        mime_list_clear(&ep->current_offer->mimes);
-        free(ep->current_offer);
-    }
     ep->current_offer = info;
     ep->is_our_offer = false;
 
@@ -435,31 +665,38 @@ static void device_handle_primary_selection(void *data, struct zwlr_data_control
     (void)device;
     struct bridge_endpoint *ep = data;
     if (ep->debug) {
-        fprintf(stderr, "[%s] primary selection event: offer=%p, pending_our_primary=%d\n",
-                ep->name, (void*)offer, ep->pending_our_primary_selections);
+        fprintf(stderr, "[%s] primary selection event: offer=%p\n", ep->name, (void*)offer);
     }
 
-    if (offer == NULL) {
+    struct offer_info *info = offer ? zwlr_data_control_offer_v1_get_user_data(offer) : NULL;
+    if (offer && !info &&
+        (!ep->current_primary_offer || ep->current_primary_offer->offer != offer)) {
+        zwlr_data_control_offer_v1_destroy(offer);
+    }
+
+    if (ep->current_primary_offer && ep->current_primary_offer != info) {
+        offer_info_destroy(ep->current_primary_offer);
+    }
+    ep->current_primary_offer = NULL;
+
+    if (!info) {
+        ep->is_our_primary_offer = false;
+        revoke_mirrored_selection(ep, true);
         return;
     }
 
-    struct offer_info *info = zwlr_data_control_offer_v1_get_user_data(offer);
-    if (!info) return;
-
-    if (ep->pending_our_primary_selections > 0) {
-        ep->pending_our_primary_selections--;
+    struct pending_owner_marker *marker = info->own_primary_marker[0] ?
+        find_pending_marker(ep, info->own_primary_marker, true) : NULL;
+    if (marker) {
+        consume_pending_marker(marker);
         ep->is_our_primary_offer = true;
+        offer_info_destroy(info);
         if (ep->debug) {
             fprintf(stderr, "[%s] Ignored echo of our own primary selection\n", ep->name);
         }
         return;
     }
 
-    if (ep->current_primary_offer && ep->current_primary_offer != info) {
-        zwlr_data_control_offer_v1_destroy(ep->current_primary_offer->offer);
-        mime_list_clear(&ep->current_primary_offer->mimes);
-        free(ep->current_primary_offer);
-    }
     ep->current_primary_offer = info;
     ep->is_our_primary_offer = false;
 
@@ -517,6 +754,14 @@ static int connect_endpoint(struct bridge_endpoint *ep, const char *name, const 
             if (ep->seat && ep->manager) {
                 return 0;
             }
+            if (ep->manager) {
+                zwlr_data_control_manager_v1_destroy(ep->manager);
+                ep->manager = NULL;
+            }
+            if (ep->seat) {
+                wl_seat_destroy(ep->seat);
+                ep->seat = NULL;
+            }
             if (ep->registry) {
                 wl_registry_destroy(ep->registry);
                 ep->registry = NULL;
@@ -538,6 +783,15 @@ static int setup_endpoint_device(struct bridge_endpoint *ep) {
     wl_display_roundtrip(ep->display);
     ep->ready = true;
     return 0;
+}
+
+static bool prepare_endpoint_read(struct wl_display *display) {
+    while (wl_display_prepare_read(display) != 0) {
+        // prepare_read also fails on a broken connection. Dispatching it
+        // repeatedly without checking the error would spin forever.
+        if (wl_display_dispatch_pending(display) < 0) return false;
+    }
+    return true;
 }
 
 static char *detect_wayland_display(const char *exclude) {
@@ -656,26 +910,36 @@ int main(int argc, char **argv) {
     fds[1].events = POLLIN;
 
     while (g_running) {
-        while (wl_display_prepare_read(host.display) != 0) {
-            wl_display_dispatch_pending(host.display);
-        }
-        while (wl_display_prepare_read(nested.display) != 0) {
-            wl_display_dispatch_pending(nested.display);
+        if (!prepare_endpoint_read(host.display)) break;
+        if (!prepare_endpoint_read(nested.display)) {
+            wl_display_cancel_read(host.display);
+            break;
         }
 
-        wl_display_flush(host.display);
-        wl_display_flush(nested.display);
-
-        int ret = poll(fds, 2, 250);
-        if (ret < 0 && errno != EINTR) {
+        if (wl_display_flush(host.display) < 0 && errno != EAGAIN) {
             wl_display_cancel_read(host.display);
             wl_display_cancel_read(nested.display);
+            break;
+        }
+        if (wl_display_flush(nested.display) < 0 && errno != EAGAIN) {
+            wl_display_cancel_read(host.display);
+            wl_display_cancel_read(nested.display);
+            break;
+        }
+
+        int ret = poll(fds, 2, 250);
+        if (ret < 0) {
+            int poll_errno = errno;
+            wl_display_cancel_read(host.display);
+            wl_display_cancel_read(nested.display);
+            if (poll_errno == EINTR) continue;
             break;
         }
 
         if (fds[0].revents & (POLLIN | POLLERR | POLLHUP)) {
             if (wl_display_read_events(host.display) < 0) {
                 if (debug) fprintf(stderr, "Host read error or disconnect: %d\n", wl_display_get_error(host.display));
+                wl_display_cancel_read(nested.display);
                 break;
             }
         } else {
@@ -691,8 +955,8 @@ int main(int argc, char **argv) {
             wl_display_cancel_read(nested.display);
         }
 
-        wl_display_dispatch_pending(host.display);
-        wl_display_dispatch_pending(nested.display);
+        if (wl_display_dispatch_pending(host.display) < 0 ||
+            wl_display_dispatch_pending(nested.display) < 0) break;
     }
 
     if (debug) {
