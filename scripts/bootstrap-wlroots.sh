@@ -6,8 +6,8 @@
 # This script:
 #   1. Reads the pinned upstream wlroots base SHA from patches/WLROOTS_BASE_REVISION
 #   2. Clones official wlroots if vendor/wlroots is absent or incomplete
-#   3. Verifies HEAD matches the pinned SHA BEFORE patching
-#   4. Applies patches/wlroots-sc7labs-rack.patch
+#   3. Verifies a pinned-base, previous-patch, or current-patch checkout
+#   4. Applies the full patch on a fresh checkout, or the incremental DnD fix
 #   5. Builds libwlroots.so.12 into vendor/wlroots/build/
 #   6. Verifies the built library has the DnD, Wayland, Pixman, EGL, GLES2,
 #      and GBM capabilities Rack needs
@@ -16,7 +16,8 @@
 #   - System wlroots (/usr/lib/libwlroots*) is NEVER modified
 #   - /usr/bin/sway is NEVER modified
 #   - vendor/wlroots/ stays local to the repo — never installed system-wide
-#   - Script is safe to re-run: skips clone/patch/build if already done
+#   - Script is safe to re-run: a current source and matching stamped build
+#     skip clone/patch/build; an interrupted upgrade rebuilds the library
 #   - Fails loudly on any SHA mismatch, patch failure, or build failure
 #   - Never silently falls back to an unpatched build
 #
@@ -34,6 +35,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WLROOTS_DIR="$REPO_ROOT/vendor/wlroots"
 BUILD_DIR="$WLROOTS_DIR/build"
 PATCH_FILE="$REPO_ROOT/patches/wlroots-sc7labs-rack.patch"
+LEGACY_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_LEGACY_PATCH_ID"
+MIGRATION_PATCH_FILE="$REPO_ROOT/patches/wlroots-dnd-lifetime-fix.patch"
 BASE_REV_FILE="$REPO_ROOT/patches/WLROOTS_BASE_REVISION"
 UPSTREAM_URL="https://gitlab.freedesktop.org/wlroots/wlroots.git"
 
@@ -75,8 +78,10 @@ verify_patched_source() {
         || die "wlroots has uncommitted tracked source changes"
     actual_patch_id="$(git -C "$WLROOTS_DIR" diff --binary "$PINNED_SHA" "$current_head" |
         git patch-id --stable | awk '{print $1}')"
-    [[ -n "$actual_patch_id" && "$actual_patch_id" == "$EXPECTED_PATCH_ID" ]] \
-        || die "wlroots changes do not match the tracked SC7Labs patch"
+    SOURCE_PATCH_ID="$actual_patch_id"
+    [[ -n "$SOURCE_PATCH_ID" &&
+       ( "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" || "$SOURCE_PATCH_ID" == "$LEGACY_PATCH_ID" ) ]] \
+        || die "wlroots changes do not match the current or supported legacy SC7Labs patch"
 }
 
 verify_library_features() {
@@ -103,6 +108,8 @@ verify_library_features() {
 
 [[ -f "$BASE_REV_FILE" ]] || die "Missing: $BASE_REV_FILE"
 [[ -f "$PATCH_FILE" ]]    || die "Missing: $PATCH_FILE"
+[[ -f "$LEGACY_PATCH_ID_FILE" ]] || die "Missing: $LEGACY_PATCH_ID_FILE"
+[[ -f "$MIGRATION_PATCH_FILE" ]] || die "Missing: $MIGRATION_PATCH_FILE"
 DEPS_HELPER="$SCRIPT_DIR/wlroots_build_deps.py"
 [[ -x "$DEPS_HELPER" ]] || die "Missing build dependency checker: $DEPS_HELPER"
 
@@ -123,15 +130,24 @@ PINNED_SHA="$(tr -d '[:space:]' < "$BASE_REV_FILE")"
 info "Pinned wlroots base revision: $PINNED_SHA"
 EXPECTED_PATCH_ID="$(git patch-id --stable < "$PATCH_FILE" | awk '{print $1}')"
 [[ -n "$EXPECTED_PATCH_ID" ]] || die "Could not identify the tracked wlroots patch"
+LEGACY_PATCH_ID="$(tr -d '[:space:]' < "$LEGACY_PATCH_ID_FILE")"
+[[ "$LEGACY_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Legacy wlroots patch ID is invalid"
 
 # ─── Step 1: Check build cache (skip if already done and not forced) ──────────
 
 BUILT_LIB="$BUILD_DIR/libwlroots.so.12"
+BUILT_PATCH_ID_FILE="$BUILD_DIR/.sc7-patch-id"
 if [[ "$FORCE_REBUILD" == "false" && -f "$BUILT_LIB" ]]; then
     [[ -d "$WLROOTS_DIR/.git" ]] \
         || die "Built library exists without a verifiable wlroots Git checkout"
     verify_patched_source
-    if command -v nm >/dev/null 2>&1 && verify_library_features; then
+    built_patch_id=""
+    if [[ -f "$BUILT_PATCH_ID_FILE" ]]; then
+        built_patch_id="$(tr -d '[:space:]' < "$BUILT_PATCH_ID_FILE")"
+    fi
+    if [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" &&
+          "$built_patch_id" == "$EXPECTED_PATCH_ID" ]] &&
+       command -v nm >/dev/null 2>&1 && verify_library_features; then
         info "Verified patched build already present — skipping rebuild."
         info "  Built library: $BUILT_LIB"
         exit 0
@@ -184,7 +200,29 @@ info "Current wlroots HEAD:   $CURRENT_HEAD (branch: $CURRENT_BRANCH)"
 
 if [[ "$CURRENT_HEAD" != "$PINNED_SHA" ]]; then
     verify_patched_source
-    info "Authentic SC7Labs patch already committed — continuing to build."
+    if [[ "$SOURCE_PATCH_ID" == "$LEGACY_PATCH_ID" ]]; then
+        info "Upgrading the authentic previous SC7Labs DnD patch in place..."
+        git -C "$WLROOTS_DIR" apply --check "$MIGRATION_PATCH_FILE" \
+            || die "Legacy DnD lifetime patch does not apply cleanly"
+        git -C "$WLROOTS_DIR" apply --index "$MIGRATION_PATCH_FILE" \
+            || die "Applying DnD lifetime fix failed"
+        upgraded_patch_id="$(git -C "$WLROOTS_DIR" diff --cached --binary "$PINNED_SHA" |
+            git patch-id --stable | awk '{print $1}')"
+        if [[ "$upgraded_patch_id" != "$EXPECTED_PATCH_ID" ]]; then
+            git -C "$WLROOTS_DIR" apply --reverse --index "$MIGRATION_PATCH_FILE" \
+                || die "Upgraded source mismatch and rollback of staged DnD fix failed"
+            die "Upgraded wlroots source does not match the current SC7Labs patch"
+        fi
+        git -C "$WLROOTS_DIR" commit --no-gpg-sign \
+            -m "fix(wlroots): release DnD state after selection and drag" \
+            || die "Committing DnD lifetime fix failed"
+        verify_patched_source
+        [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
+            || die "Upgraded wlroots source does not match the current SC7Labs patch"
+        info "Legacy DnD patch upgraded without recloning or reapplying the base patch."
+    else
+        info "Authentic SC7Labs patch already committed — continuing to build."
+    fi
 else
     # HEAD == base SHA: apply the patch
     info "Applying SC7Labs patch..."
@@ -208,6 +246,8 @@ else
 
     info "Patch applied and committed."
     verify_patched_source
+    [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
+        || die "Freshly patched wlroots source does not match the current SC7Labs patch"
 fi
 
 # ─── Step 4: Configure with Meson ─────────────────────────────────────────────
@@ -275,6 +315,16 @@ info "  Library: $BUILT_LIB (${LIB_SIZE} bytes)"
 if ! verify_library_features; then
     die "Built library is missing required Wayland, Pixman, EGL, GLES2, GBM, or SC7Labs DnD features"
 fi
+
+# A previous libwlroots can have every exported symbol while still containing
+# old DnD code. Mark the build only after Ninja and feature verification, so
+# an interrupted source upgrade can never be accepted as a cached build.
+stamp_tmp="$(mktemp "$BUILD_DIR/.sc7-patch-id.XXXXXXXX")" \
+    || die "Could not create wlroots build verification stamp"
+printf '%s\n' "$EXPECTED_PATCH_ID" > "$stamp_tmp" \
+    || die "Could not write wlroots build verification stamp"
+mv -f -- "$stamp_tmp" "$BUILT_PATCH_ID_FILE" \
+    || die "Could not publish wlroots build verification stamp"
 
 info "  DnD, Wayland, Pixman, EGL, GLES2, and GBM capabilities verified."
 info ""

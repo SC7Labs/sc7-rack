@@ -47,13 +47,34 @@ class BootstrapRerunTests(unittest.TestCase):
         self.base_sha = self.git("rev-parse", "HEAD").stdout.strip()
         self.git("checkout", "-qb", "working-dnd-transport")
 
-        # Generate a real Git patch against the base without altering the
-        # fixture's checkout until an individual test applies it.
+        # Generate current and supported-legacy patches against the base.
+        # The migration is an incremental change to the old patched checkout.
         source = self.wlroots / "backend.txt"
+        source.write_text("SC7 legacy transport\n", encoding="utf-8")
+        legacy_patch = self.git("diff", "--", "backend.txt").stdout
+        (self.patches / "wlroots-legacy.patch").write_text(
+            legacy_patch, encoding="utf-8"
+        )
+        legacy_id = subprocess.run(
+            ["git", "patch-id", "--stable"], input=legacy_patch,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()[0]
+        (self.patches / "WLROOTS_LEGACY_PATCH_ID").write_text(
+            legacy_id + "\n", encoding="utf-8"
+        )
         source.write_text("SC7 patched transport\n", encoding="utf-8")
         patch = self.git("diff", "--", "backend.txt").stdout
         (self.patches / "wlroots-sc7labs-rack.patch").write_text(
             patch, encoding="utf-8"
+        )
+        (self.patches / "wlroots-dnd-lifetime-fix.patch").write_text(
+            "diff --git a/backend.txt b/backend.txt\n"
+            "--- a/backend.txt\n"
+            "+++ b/backend.txt\n"
+            "@@ -1 +1 @@\n"
+            "-SC7 legacy transport\n"
+            "+SC7 patched transport\n",
+            encoding="utf-8",
         )
         self.git("checkout", "--", "backend.txt")
         (self.patches / "WLROOTS_BASE_REVISION").write_text(
@@ -94,6 +115,8 @@ import sys
 with open(os.environ['SC7_TEST_COMMAND_LOG'], 'a', encoding='utf-8') as log:
     log.write('ninja ' + ' '.join(sys.argv[1:]) + '\\n')
 build = Path(sys.argv[sys.argv.index('-C') + 1])
+if os.getenv('SC7_TEST_NINJA_FAIL'):
+    sys.exit(2)
 (build / 'libwlroots.so.12').write_text(
     'valid-symbol full-renderer\\n' if not os.getenv('SC7_TEST_RENDERERLESS_BUILD')
     else 'valid-symbol\\n', encoding='utf-8')
@@ -146,6 +169,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.git("commit", "-qm", "build(wlroots): apply SC7Labs Rack patches")
         return self.git("rev-parse", "HEAD").stdout.strip()
 
+    def commit_legacy_patch(self) -> str:
+        self.git("apply", str(self.patches / "wlroots-legacy.patch"))
+        self.git("add", "backend.txt")
+        self.git("commit", "-qm", "build(wlroots): apply previous SC7Labs Rack patch")
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
     def run_bootstrap(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(self.scripts / "bootstrap-wlroots.sh"), *args],
@@ -190,6 +219,93 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         second = self.run_bootstrap()
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(self.commands(), before)
+
+    def test_previous_patched_checkout_upgrades_in_place(self) -> None:
+        legacy_sha = self.commit_legacy_patch()
+        build = self.wlroots / "build"
+        build.mkdir()
+        (build / "build.ninja").write_text("old graph\n", encoding="utf-8")
+        (build / "libwlroots.so.12").write_text(
+            "valid-symbol full-renderer\n", encoding="utf-8"
+        )
+
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Upgrading the authentic previous SC7Labs DnD patch", result.stdout)
+        self.assertIn("Legacy DnD patch upgraded without recloning", result.stdout)
+        self.assertEqual(
+            (self.wlroots / "backend.txt").read_text(encoding="utf-8"),
+            "SC7 patched transport\n",
+        )
+        self.assertNotEqual(self.git("rev-parse", "HEAD").stdout.strip(), legacy_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertTrue(any(command.startswith("meson setup --wipe")
+                            for command in self.commands()))
+        self.assertTrue(any(command.startswith("ninja ") for command in self.commands()))
+        self.assertFalse(any(command.startswith("blocked-network-git ")
+                             for command in self.commands()))
+
+        before = self.commands()
+        second = self.run_bootstrap("--install-deps")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.commands(), before)
+
+    def test_interrupted_legacy_upgrade_never_accepts_old_library(self) -> None:
+        self.commit_legacy_patch()
+        build = self.wlroots / "build"
+        build.mkdir()
+        (build / "build.ninja").write_text("old graph\n", encoding="utf-8")
+        library = build / "libwlroots.so.12"
+        library.write_text("valid-symbol full-renderer\n", encoding="utf-8")
+        self.env["SC7_TEST_NINJA_FAIL"] = "1"
+
+        first = self.run_bootstrap()
+        self.assertNotEqual(first.returncode, 0)
+        self.assertEqual(
+            (self.wlroots / "backend.txt").read_text(encoding="utf-8"),
+            "SC7 patched transport\n",
+        )
+        self.assertEqual(library.read_text(encoding="utf-8"),
+                         "valid-symbol full-renderer\n")
+        self.assertFalse((build / ".sc7-patch-id").exists())
+
+        self.env.pop("SC7_TEST_NINJA_FAIL")
+        before = len([cmd for cmd in self.commands() if cmd.startswith("ninja ")])
+        second = self.run_bootstrap()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertNotIn("skipping rebuild", second.stdout.lower())
+        self.assertEqual(
+            len([cmd for cmd in self.commands() if cmd.startswith("ninja ")]),
+            before + 1,
+        )
+        self.assertEqual(
+            (build / ".sc7-patch-id").read_text(encoding="utf-8").strip(),
+            subprocess.run(
+                ["git", "patch-id", "--stable"],
+                input=(self.patches / "wlroots-sc7labs-rack.patch").read_text(),
+                capture_output=True, text=True, check=True,
+            ).stdout.split()[0],
+        )
+
+    def test_invalid_legacy_upgrade_rolls_back_before_commit(self) -> None:
+        legacy_sha = self.commit_legacy_patch()
+        migration = self.patches / "wlroots-dnd-lifetime-fix.patch"
+        migration.write_text(
+            migration.read_text(encoding="utf-8").replace(
+                "SC7 patched transport", "SC7 wrong transport"
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match the current SC7Labs patch", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), legacy_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertEqual(
+            (self.wlroots / "backend.txt").read_text(encoding="utf-8"),
+            "SC7 legacy transport\n",
+        )
 
     def test_unrelated_descendant_is_not_accepted_as_patch(self) -> None:
         (self.wlroots / "backend.txt").write_text("unrelated change\n", encoding="utf-8")
@@ -244,6 +360,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         (build / "build.ninja").write_text("old graph\n", encoding="utf-8")
         library = build / "libwlroots.so.12"
         library.write_text("valid-symbol\n", encoding="utf-8")
+        current_patch_id = subprocess.run(
+            ["git", "patch-id", "--stable"],
+            input=(self.patches / "wlroots-sc7labs-rack.patch").read_text(),
+            capture_output=True, text=True, check=True,
+        ).stdout.split()[0]
+        (build / ".sc7-patch-id").write_text(current_patch_id + "\n", encoding="utf-8")
 
         result = self.run_bootstrap("--install-deps")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
