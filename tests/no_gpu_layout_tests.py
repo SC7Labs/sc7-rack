@@ -13,6 +13,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RACK_SWAY = ROOT / "vendor/sway/build/sway/sway"
+WLROOTS_BUILD = ROOT / "vendor/wlroots/build"
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -20,9 +22,12 @@ def write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
-@unittest.skipUnless(shutil.which("sway") and shutil.which("foot"), "headless Sway and foot required")
+@unittest.skipUnless(RACK_SWAY.is_file() and shutil.which("foot"),
+                     "Rack-local Sway and foot required")
 class NoGpuLayoutTests(unittest.TestCase):
     def test_no_gpu_terminal_persists_in_four_quadrants(self):
+        subprocess.run([str(ROOT / "scripts/bootstrap-sway.sh"), "--check"],
+                       check=True, capture_output=True)
         with tempfile.TemporaryDirectory(prefix="sc7-no-gpu-layout-") as tmp:
             base = Path(tmp)
             fake_bin = base / "fake-bin"
@@ -79,6 +84,7 @@ exec foot --app-id=files -e sleep 30
                 "WLR_BACKENDS": "headless",
                 "WLR_RENDERER": "pixman",
                 "WLR_LIBINPUT_NO_DEVICES": "1",
+                "LD_LIBRARY_PATH": str(WLROOTS_BUILD),
             })
             for key in ("WAYLAND_DISPLAY", "DISPLAY", "SWAYSOCK"):
                 env.pop(key, None)
@@ -86,7 +92,7 @@ exec foot --app-id=files -e sleep 30
             sway_log = (base / "sway.log").open("w")
             inner_log = (base / "inner.log").open("w")
             sway = subprocess.Popen(
-                ["sway", "-c", str(sway_config)], env=env,
+                [str(RACK_SWAY), "-c", str(sway_config)], env=env,
                 stdout=sway_log, stderr=subprocess.STDOUT, start_new_session=True,
             )
             inner = None

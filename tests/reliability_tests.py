@@ -13,6 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bin/sc7-clipboard-bridge"
 WLROOTS_BUILD = ROOT / "vendor/wlroots/build"
+RACK_SWAY = ROOT / "vendor/sway/build/sway/sway"
 CYCLES = 140
 
 
@@ -70,11 +71,14 @@ def stop_exact(process: subprocess.Popen) -> None:
 
 @unittest.skipUnless(
     all(shutil.which(name) for name in ("sway", "wl-copy", "wl-paste"))
-    and BRIDGE.is_file() and (WLROOTS_BUILD / "libwlroots.so.12").is_file(),
-    "Sway, wl-clipboard, bridge, and patched wlroots build required",
+    and BRIDGE.is_file() and (WLROOTS_BUILD / "libwlroots.so.12").is_file()
+    and RACK_SWAY.is_file(),
+    "Sway, wl-clipboard, bridge, and patched Rack builds required",
 )
 class IsolatedClipboardReliabilityTests(unittest.TestCase):
     def test_140_bidirectional_ownership_swaps_plateau(self) -> None:
+        subprocess.run([str(ROOT / "scripts/bootstrap-sway.sh"), "--check"],
+                       check=True, capture_output=True)
         # Both compositors and every clipboard owner use private sockets; the
         # host desktop's clipboard and the user's running Rack are untouched.
         with tempfile.TemporaryDirectory(prefix="sc7-reliability-") as temp:
@@ -116,7 +120,7 @@ class IsolatedClipboardReliabilityTests(unittest.TestCase):
                 nested_env = dict(base_env, WLR_BACKENDS="wayland", WAYLAND_DISPLAY=host_socket.name)
                 before = wayland_sockets(runtime)
                 nested = subprocess.Popen(
-                    ["sway", "-c", str(config)], env=nested_env,
+                    [str(RACK_SWAY), "-c", str(config)], env=nested_env,
                     stdout=logs[1], stderr=subprocess.STDOUT, start_new_session=True,
                 )
                 processes.append(nested)

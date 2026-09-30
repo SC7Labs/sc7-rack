@@ -164,6 +164,7 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
             SC7_TEST_OPEN_CAPTURE=str(cls.open_capture),
             SC7_TEST_FILES_CAPTURE=str(cls.files_capture),
             SC7_TEST_MIME_CAPTURE=str(cls.mime_capture),
+            SC7_RACK_SWAY_BINARY=str(cls.host_bin / "sway"),
         )
 
         # Simulate an existing install whose copied inner.sh predates the shim.
