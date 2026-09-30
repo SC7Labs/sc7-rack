@@ -231,6 +231,27 @@ fi
 
 echo "  ✓ Patched wlroots: $WLROOTS_LIB"
 
+# ─── Phase 2b: Build Rack-local Sway with the popup lifecycle fix ────────────
+
+echo ""
+echo "── Bootstrapping Rack-local Sway (required for context menus) ──"
+
+SWAY_BOOTSTRAP="$SCRIPT_DIR/scripts/bootstrap-sway.sh"
+RACK_SWAY="$SCRIPT_DIR/vendor/sway/build/sway/sway"
+if [[ ! -x "$SWAY_BOOTSTRAP" ]]; then
+    echo "  ERROR: scripts/bootstrap-sway.sh is missing or not executable." >&2
+    exit 1
+fi
+"$SWAY_BOOTSTRAP" --install-deps || {
+    echo "  ERROR: Rack-local Sway bootstrap failed. System Sway was not modified." >&2
+    exit 1
+}
+if [[ ! -x "$RACK_SWAY" ]]; then
+    echo "  ERROR: Rack-local Sway is missing after bootstrap: $RACK_SWAY" >&2
+    exit 1
+fi
+echo "  ✓ Rack-local Sway: $RACK_SWAY"
+
 # ─── Phase 3: Build clipboard bridge ────────────────────────────────────────
 
 echo ""
@@ -360,6 +381,12 @@ if [[ -f "$WLROOTS_LIB" ]]; then
 else
     echo "  ✗ Patched wlroots library MISSING: $WLROOTS_LIB" >&2
     echo "    SC7Labs DnD will not function without this library." >&2
+    VALIDATION_FAILED=true
+fi
+if [[ -x "$RACK_SWAY" ]] && "$SWAY_BOOTSTRAP" --check >/dev/null 2>&1; then
+    echo "  ✓ Rack-local Sway verified: $RACK_SWAY"
+else
+    echo "  ✗ Rack-local Sway missing or stale: $RACK_SWAY" >&2
     VALIDATION_FAILED=true
 fi
 

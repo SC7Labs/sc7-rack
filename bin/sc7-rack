@@ -202,12 +202,18 @@ fi
 export WLR_BACKENDS=wayland
 export WLR_LIBINPUT_NO_DEVICES=1
 
-# Verify sway is available
-if ! command -v sway >/dev/null 2>&1; then
-    echo "Error: 'sway' is not installed or not in PATH." >&2
-    if command -v notify-send >/dev/null 2>&1; then
-        notify-send "SC7Labs Rack" "Error: sway is not installed." --icon=dialog-error 2>/dev/null || true
+# Rack uses a pinned local Sway build. The explicit override is used by the
+# isolated launcher tests; normal sessions verify the source and build stamp
+# before starting, so an old system Sway cannot silently restore the popup bug.
+SWAY_BIN="${SC7_RACK_SWAY_BINARY:-$PROJECT_ROOT/vendor/sway/build/sway/sway}"
+if [[ -n "${SC7_RACK_SWAY_BINARY:-}" ]]; then
+    if [[ ! -x "$SWAY_BIN" ]]; then
+        echo "Error: Sway override is not executable: $SWAY_BIN" >&2
+        exit 1
     fi
+elif [[ ! -x "$PROJECT_ROOT/scripts/bootstrap-sway.sh" ]] ||
+     ! "$PROJECT_ROOT/scripts/bootstrap-sway.sh" --check; then
+    echo "Error: Rack-local Sway is missing or stale. Run ./install.sh." >&2
     exit 1
 fi
 
@@ -272,7 +278,7 @@ cleanup() {
 }
 
 cd "$HOME"
-PATH="$SC7_RACK_PRIVATE_BIN:$PATH" sway --config "$CONFIG_FILE" &
+PATH="$SC7_RACK_PRIVATE_BIN:$PATH" "$SWAY_BIN" --config "$CONFIG_FILE" &
 SWAY_PID=$!
 echo "$SWAY_PID" > "$PID_FILE"
 
