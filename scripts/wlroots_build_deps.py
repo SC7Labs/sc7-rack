@@ -9,6 +9,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+
+
+PACKAGE_INSTALLER = Path(__file__).resolve().with_name("install-packages.sh")
 
 
 @dataclass(frozen=True)
@@ -23,9 +27,10 @@ class Requirement:
 # explicitly required GLES2 renderer/GBM allocator, and bootstrap/bridge tools.
 REQUIREMENTS = (
     Requirement("git", "git"),
-    Requirement("meson", "meson", "tool", "0.59.0"),
+    Requirement("meson", "meson", "tool", "0.60.0"),
     Requirement("ninja", "ninja-build"),
     Requirement("gcc", "gcc"),
+    Requirement("C headers and linker", "libc6-dev", "compile"),
     Requirement("make", "make"),
     Requirement("nm", "binutils"),
     Requirement("pkg-config", "pkg-config"),
@@ -41,7 +46,7 @@ REQUIREMENTS = (
     Requirement("pkg:gbm>=17.1.0", "libgbm-dev", "pc", "17.1.0"),
     Requirement("pkg:glesv2", "libgles-dev", "pc"),
 )
-BRIDGE_LABELS = {"make", "gcc", "pkg-config", "pkg:wayland-client"}
+BRIDGE_LABELS = {"make", "gcc", "C headers and linker", "pkg-config", "pkg:wayland-client"}
 BRIDGE_REQUIREMENTS = tuple(
     requirement for requirement in REQUIREMENTS if requirement.label in BRIDGE_LABELS
 )
@@ -54,6 +59,34 @@ def version_at_least(actual: str, minimum: str) -> bool:
     found = tuple(int(part) for part in match.group(1).split("."))
     needed = tuple(int(part) for part in minimum.split("."))
     return found + (0,) * (3 - len(found)) >= needed + (0,) * (3 - len(needed))
+
+
+def c_toolchain_works() -> bool:
+    """A compiler executable alone does not supply libc headers/startup objects."""
+    if shutil.which("gcc") is None:
+        return False
+    source = """#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <pthread.h>
+#include <math.h>
+int main(void) {
+    volatile double value = 2.0;
+    printf("%f %lu\\n", sqrt(value), (unsigned long)pthread_self());
+    return EXIT_SUCCESS;
+}
+"""
+    try:
+        with tempfile.TemporaryDirectory(prefix="sc7-compiler-check-") as temporary:
+            result = subprocess.run(
+                ["gcc", "-x", "c", "-", "-o", str(Path(temporary) / "probe"),
+                 "-lm", "-lrt", "-pthread"],
+                input=source, text=True, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        return result.returncode == 0
+    except OSError:
+        return False
 
 
 def missing_requirements(requirements: tuple[Requirement, ...] = REQUIREMENTS) -> list[Requirement]:
@@ -73,6 +106,9 @@ def missing_requirements(requirements: tuple[Requirement, ...] = REQUIREMENTS) -
                         missing.append(requirement)
                 except OSError:
                     missing.append(requirement)
+        elif requirement.kind == "compile":
+            if not c_toolchain_works():
+                missing.append(requirement)
         elif have_pkg_config:
             package_name = requirement.label.removeprefix("pkg:").split(">=", 1)[0]
             command = ["pkg-config", "--exists", package_name]
@@ -138,14 +174,7 @@ def ensure_build_dependencies(install: bool, bridge_only: bool = False) -> int:
         packages = apt_packages(missing)
         if not packages:
             break
-        if os.geteuid() == 0:
-            command = ["apt-get"]
-        elif shutil.which("sudo") is not None:
-            command = ["sudo", "apt-get"]
-        else:
-            print("  sudo is required to install the packages shown above.", file=sys.stderr)
-            return 1
-        command += ["install", "-y", "--no-install-recommends", *packages]
+        command = [str(PACKAGE_INSTALLER), *packages]
         print("Installing required SC7Labs Rack build dependencies: " + " ".join(packages), flush=True)
         if subprocess.run(command, check=False).returncode != 0:
             print("  Package installation failed; fix the apt error above and rerun ./install.sh.",

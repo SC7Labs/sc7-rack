@@ -30,6 +30,7 @@ fi
 echo "Removing desktop entries..."
 rm -f "$XDG_DATA_HOME/applications/sc7-rack.desktop"
 rm -f "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
+rm -f "$XDG_DATA_HOME/applications/dev.sc7labs.rack.desktop"
 rm -f "$XDG_CONFIG_HOME/autostart/sc7-rack.desktop"
 
 # 3. Remove icons
@@ -56,6 +57,9 @@ for bindir in "$XDG_BIN_HOME" "$HOME/bin"; do
         fi
     done
 done
+
+# Remove only the shell alias block installed by Rack.
+python3 "$SCRIPT_DIR/scripts/install_launchers.py" --remove-aliases
 
 # 5. Remove sudoers rule if present
 SUDOERS="/etc/sudoers.d/sc7-intel-gpu-top"

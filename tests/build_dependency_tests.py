@@ -26,7 +26,7 @@ class BuildDependencyTests(unittest.TestCase):
     def test_bridge_only_checks_and_installs_its_own_inputs(self):
         self.assertEqual(
             [item.label for item in deps.BRIDGE_REQUIREMENTS],
-            ["gcc", "make", "pkg-config", "pkg:wayland-client"],
+            ["gcc", "C headers and linker", "make", "pkg-config", "pkg:wayland-client"],
         )
         missing = [requirement("make"), requirement("pkg:wayland-client")]
         with mock.patch.object(deps, "missing_requirements", side_effect=[missing, []]) as probe, \
@@ -42,8 +42,7 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertEqual(probe.call_args_list,
                          [mock.call(deps.BRIDGE_REQUIREMENTS), mock.call(deps.BRIDGE_REQUIREMENTS)])
         run.assert_called_once_with(
-            ["sudo", "apt-get", "install", "-y", "--no-install-recommends",
-             "make", "libwayland-dev"], check=False,
+            [str(deps.PACKAGE_INSTALLER), "make", "libwayland-dev"], check=False,
         )
 
     def test_apt_mapping_is_minimal_and_deduplicated(self):
@@ -135,8 +134,25 @@ class BuildDependencyTests(unittest.TestCase):
             missing = deps.missing_requirements()
 
         self.assertEqual([item.label for item in missing], ["pkg-config"])
-        run.assert_called_once_with(["meson", "--version"], check=False,
-                                    capture_output=True, text=True)
+        run.assert_any_call(["meson", "--version"], check=False,
+                            capture_output=True, text=True)
+        self.assertFalse(any(call.args[0][0] == "pkg-config" for call in run.call_args_list))
+
+    def test_gcc_without_headers_or_linker_is_not_a_ready_toolchain(self):
+        def fake_run(command, **_kwargs):
+            if command[0] == "gcc":
+                return subprocess.CompletedProcess(command, 1)
+            return subprocess.CompletedProcess(command, 0, stdout="1.3.2\n")
+
+        with mock.patch.object(deps.shutil, "which", return_value="/fake/tool"), \
+             mock.patch.object(deps.subprocess, "run", side_effect=fake_run) as run:
+            missing = deps.missing_requirements()
+        self.assertEqual([item.label for item in missing], ["C headers and linker"])
+        self.assertEqual(deps.apt_packages(missing), ["libc6-dev"])
+        compiler_call = next(call for call in run.call_args_list if call.args[0][0] == "gcc")
+        self.assertIn("#include <stdio.h>", compiler_call.kwargs["input"])
+        self.assertIn("-pthread", compiler_call.args[0])
+        self.assertIn("-lrt", compiler_call.args[0])
 
     def test_old_meson_is_reported_before_build(self):
         def fake_run(command, **_kwargs):
@@ -205,8 +221,7 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(probe.call_count, 2)
         run.assert_called_once_with(
-            ["sudo", "apt-get", "install", "-y", "--no-install-recommends",
-             "ninja-build", "libwayland-dev"], check=False,
+            [str(deps.PACKAGE_INSTALLER), "ninja-build", "libwayland-dev"], check=False,
         )
         self.assertIn("Build dependencies ready", stdout.getvalue())
 
@@ -227,8 +242,8 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
-                ["apt-get", "install", "-y", "--no-install-recommends", "pkg-config"],
-                ["apt-get", "install", "-y", "--no-install-recommends", "libxkbcommon-dev"],
+                [str(deps.PACKAGE_INSTALLER), "pkg-config"],
+                [str(deps.PACKAGE_INSTALLER), "libxkbcommon-dev"],
             ],
         )
 

@@ -147,7 +147,11 @@ import sys
 with open(os.environ['SC7_TEST_COMMAND_LOG'], 'a', encoding='utf-8') as log:
     log.write('meson ' + ' '.join(sys.argv[1:]) + '\\n')
 args = sys.argv[1:]
-build = Path(args[2] if '--reconfigure' in args else args[1])
+build = Path(args[2] if '--reconfigure' in args or '--wipe' in args else args[1])
+if (build / 'meson-private/SC7_TEST_FAIL_FIRST').exists() and '--wipe' not in args:
+    sys.exit(2)
+if (build / 'meson-private/SC7_TEST_NO_GRAPH').exists() and '--wipe' not in args:
+    sys.exit(0)
 build.mkdir(parents=True, exist_ok=True)
 (build / 'build.ninja').write_text('fake build graph\\n', encoding='utf-8')
 """,
@@ -175,7 +179,23 @@ binary.chmod(0o755)
 print('libwlroots.so.12 => ' + os.environ['SC7_TEST_WLROOTS_LIB'])
 """,
         )
-        executable(self.fake_bin / "pkg-config", "import sys\nsys.exit(0)\n")
+        executable(self.fake_bin / "pkg-config", """import os
+from pathlib import Path
+import sys
+marker = os.getenv('SC7_TEST_MISSING_DEP')
+sys.exit(1 if marker and Path(marker).exists() and 'json-c' in sys.argv else 0)
+""")
+        executable(self.scripts / "install-packages.sh", """import os
+from pathlib import Path
+import sys
+with open(os.environ['SC7_TEST_COMMAND_LOG'], 'a', encoding='utf-8') as log:
+    log.write('install-packages ' + ' '.join(sys.argv[1:]) + '\\n')
+if os.getenv('SC7_TEST_APT_FAIL'):
+    sys.exit(100)
+marker = os.getenv('SC7_TEST_MISSING_DEP')
+if marker:
+    Path(marker).unlink()
+""")
         executable(self.fake_bin / "wayland-scanner", "")
         real_git = shutil.which("git")
         assert real_git is not None
@@ -268,6 +288,43 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), expected_head)
         self.assert_verified()
+
+    def test_missing_sway_dependency_uses_package_helper_and_rechecks_prefix(self) -> None:
+        marker = self.root / "missing-json-c"
+        marker.touch()
+        self.env["SC7_TEST_MISSING_DEP"] = str(marker)
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("install-packages libjson-c-dev", self.commands())
+        self.assertFalse(marker.exists())
+        self.assert_verified()
+
+    def test_dependency_install_failure_does_not_start_build(self) -> None:
+        marker = self.root / "missing-json-c"
+        marker.touch()
+        self.env["SC7_TEST_MISSING_DEP"] = str(marker)
+        self.env["SC7_TEST_APT_FAIL"] = "1"
+        result = self.run_bootstrap("--install-deps")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not install Sway build dependencies", result.stderr)
+        self.assertFalse(any(line.startswith("meson ") for line in self.commands()))
+        self.assertEqual(self.tracked_status(), "")
+
+    def test_interrupted_meson_configuration_recovers(self) -> None:
+        for marker_name in ("SC7_TEST_FAIL_FIRST", "SC7_TEST_NO_GRAPH"):
+            with self.subTest(marker=marker_name):
+                build = self.sway / "build"
+                if build.exists():
+                    shutil.rmtree(build)
+                metadata = build / "meson-private"
+                metadata.mkdir(parents=True)
+                (metadata / marker_name).touch()
+                result = self.run_bootstrap()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Recovering incomplete Sway Meson configuration", result.stdout)
+                self.assertTrue(any(line.startswith("meson setup --wipe ")
+                                    for line in self.commands()))
+                self.assert_verified()
 
     def test_exact_vm_partial_state_recovers_without_reclone(self) -> None:
         old_head = self.commit_legacy_patch()

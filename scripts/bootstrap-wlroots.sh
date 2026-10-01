@@ -66,6 +66,31 @@ die() {
 
 info() { echo "  [bootstrap-wlroots] $*"; }
 
+commit_rack_patch() {
+    git -C "$WLROOTS_DIR" -c user.name='SC7 Rack build' \
+        -c user.email='build@sc7.invalid' commit --no-gpg-sign -m "$1"
+}
+
+verify_staged_fresh_patch() {
+    # A previous install without a configured Git identity can leave the full
+    # patch staged at the pinned base. Compare exact trees, including whitespace,
+    # before completing that commit; genuine user edits remain a hard failure.
+    local temporary expected_tree actual_tree failed=false
+    git -C "$WLROOTS_DIR" diff --quiet || return 1
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/sc7-wlroots-index.XXXXXXXX")" || return 1
+    if ! GIT_INDEX_FILE="$temporary/index" git -C "$WLROOTS_DIR" read-tree "$PINNED_SHA" ||
+       ! GIT_INDEX_FILE="$temporary/index" git -C "$WLROOTS_DIR" apply --cached "$PATCH_FILE"; then
+        rm -f -- "$temporary/index"
+        rmdir -- "$temporary"
+        return 1
+    fi
+    expected_tree="$(GIT_INDEX_FILE="$temporary/index" git -C "$WLROOTS_DIR" write-tree)" || failed=true
+    actual_tree="$(git -C "$WLROOTS_DIR" write-tree)" || failed=true
+    rm -f -- "$temporary/index"
+    rmdir -- "$temporary"
+    [[ "$failed" == false && "$expected_tree" =~ ^[0-9a-f]{40}$ && "$actual_tree" == "$expected_tree" ]]
+}
+
 verify_patched_source() {
     local current_head actual_patch_id
     current_head="$(git -C "$WLROOTS_DIR" rev-parse HEAD 2>/dev/null)" \
@@ -213,8 +238,7 @@ if [[ "$CURRENT_HEAD" != "$PINNED_SHA" ]]; then
                 || die "Upgraded source mismatch and rollback of staged DnD fix failed"
             die "Upgraded wlroots source does not match the current SC7Labs patch"
         fi
-        git -C "$WLROOTS_DIR" commit --no-gpg-sign \
-            -m "fix(wlroots): release DnD state after selection and drag" \
+        commit_rack_patch "fix(wlroots): release DnD state after selection and drag" \
             || die "Committing DnD lifetime fix failed"
         verify_patched_source
         [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
@@ -226,22 +250,17 @@ if [[ "$CURRENT_HEAD" != "$PINNED_SHA" ]]; then
 else
     # HEAD == base SHA: apply the patch
     info "Applying SC7Labs patch..."
-    git -C "$WLROOTS_DIR" diff --quiet && git -C "$WLROOTS_DIR" diff --cached --quiet \
-        || die "wlroots has uncommitted tracked source changes"
+    if ! git -C "$WLROOTS_DIR" diff --quiet || ! git -C "$WLROOTS_DIR" diff --cached --quiet; then
+        verify_staged_fresh_patch || die "wlroots has uncommitted tracked source changes"
+        info "Completing the authenticated patch left staged by an interrupted install."
+    else
+        git -C "$WLROOTS_DIR" apply --check "$PATCH_FILE" \
+            || die "Patch does not apply cleanly to $PINNED_SHA — patch mismatch."
+        git -C "$WLROOTS_DIR" apply --index "$PATCH_FILE" \
+            || die "Patch application failed."
+    fi
 
-    # Dry-run first
-    git -C "$WLROOTS_DIR" apply --check "$PATCH_FILE" \
-        || die "Patch does not apply cleanly to $PINNED_SHA — patch mismatch."
-
-    git -C "$WLROOTS_DIR" apply "$PATCH_FILE" \
-        || die "Patch application failed."
-
-    git -C "$WLROOTS_DIR" add -A \
-        || die "git add after patch failed"
-
-    git -C "$WLROOTS_DIR" commit \
-        --no-gpg-sign \
-        -m "build(wlroots): apply SC7Labs Rack patches" \
+    commit_rack_patch "build(wlroots): apply SC7Labs Rack patches" \
         || die "git commit after patch failed"
 
     info "Patch applied and committed."

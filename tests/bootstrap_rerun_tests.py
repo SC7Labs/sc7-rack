@@ -189,6 +189,56 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             return []
         return self.log.read_text(encoding="utf-8").splitlines()
 
+    def remove_git_identity(self) -> None:
+        self.git("config", "--unset", "user.name")
+        self.git("config", "--unset", "user.email")
+        self.git("config", "commit.gpgSign", "true")
+        self.env["GIT_CONFIG_GLOBAL"] = os.devnull
+        self.env["GIT_CONFIG_NOSYSTEM"] = "1"
+        for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                     "GIT_COMMITTER_EMAIL", "EMAIL"):
+            self.env.pop(name, None)
+
+    def test_fresh_user_needs_no_git_identity_or_signing_setup(self) -> None:
+        self.remove_git_identity()
+        untracked = self.wlroots / "keep-local-notes.txt"
+        untracked.write_text("preserve this file\n", encoding="utf-8")
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git("log", "-1", "--format=%an <%ae>").stdout.strip(),
+                         "SC7 Rack build <build@sc7.invalid>")
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no").stdout, "")
+        self.assertEqual(untracked.read_text(), "preserve this file\n")
+        self.assertNotIn("keep-local-notes.txt", self.git("ls-files").stdout)
+        before = self.commands()
+        second = self.run_bootstrap("--install-deps")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.commands(), before)
+
+    def test_exact_staged_fresh_patch_recovers_after_old_identity_failure(self) -> None:
+        self.remove_git_identity()
+        self.git("apply", "--index", str(self.patches / "wlroots-sc7labs-rack.patch"))
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Completing the authenticated patch", result.stdout)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+
+    def test_staged_patch_with_unrelated_change_is_rejected(self) -> None:
+        self.git("apply", "--index", str(self.patches / "wlroots-sc7labs-rack.patch"))
+        (self.wlroots / "backend.txt").write_text("SC7 patched transport\nuser edit\n")
+        self.git("add", "backend.txt")
+        result = self.run_bootstrap("--install-deps")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uncommitted tracked source changes", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.base_sha)
+
+    def test_legacy_upgrade_needs_no_git_identity(self) -> None:
+        self.commit_legacy_patch()
+        self.remove_git_identity()
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+
     def test_committed_patch_without_build_resumes_without_reapplying(self) -> None:
         patched_sha = self.commit_patch()
         result = self.run_bootstrap()

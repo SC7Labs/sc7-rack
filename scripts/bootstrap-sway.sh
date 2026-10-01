@@ -241,15 +241,16 @@ fi
 if (( ${#packages[@]} > 0 )); then
     mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
 fi
-if (( ${#missing[@]} > 0 )) && [[ "$INSTALL_DEPS" == true ]] &&
-        command -v apt-get >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo apt-get update -qq
-    sudo apt-get install -y --no-install-recommends "${packages[@]}"
+if (( ${#packages[@]} > 0 )) && [[ "$INSTALL_DEPS" == true ]]; then
+    "$ROOT/scripts/install-packages.sh" "${packages[@]}" ||
+        die "Could not install Sway build dependencies; rerun ./install.sh after fixing the package error"
     missing=()
     for dependency in "${REQUIRED_PC[@]}"; do
         pkg-config --exists "$dependency" || missing+=("$dependency")
     done
-    [[ -f /usr/include/libinput.h ]] || missing+=(libinput-header)
+    [[ -f /usr/include/libinput.h ||
+       ( -n "${SC7_SWAY_DEP_PREFIX:-}" && -f "$SC7_SWAY_DEP_PREFIX/usr/include/libinput.h" ) ]] ||
+        missing+=(libinput-header)
 fi
 if (( ${#missing[@]} > 0 )); then
     die "Missing Sway build dependencies: ${missing[*]}. Run: sudo apt-get install ${packages[*]}; then rerun ./install.sh"
@@ -279,9 +280,20 @@ if [[ -f "$BUILD/build.ninja" ]]; then
         ninja -C "$BUILD" -t clean sway/sway
     fi
 else
-    meson setup "$BUILD" "$SOURCE" --buildtype=release \
+    if ! meson setup "$BUILD" "$SOURCE" --buildtype=release \
         -Dman-pages=disabled -Dxwayland=disabled -Dtray=disabled \
-        -Dswaybar=false -Dswaynag=false -Dgdk-pixbuf=disabled "${meson_extra[@]}"
+        -Dswaybar=false -Dswaynag=false -Dgdk-pixbuf=disabled "${meson_extra[@]}"; then
+        [[ -d "$BUILD/meson-private" ]] || die "Sway Meson configuration failed"
+    fi
+    if [[ ! -f "$BUILD/build.ninja" ]]; then
+        [[ -d "$BUILD/meson-private" ]] || die "Sway Meson did not create build.ninja"
+        info "Recovering incomplete Sway Meson configuration..."
+        meson setup --wipe "$BUILD" "$SOURCE" --buildtype=release \
+            -Dman-pages=disabled -Dxwayland=disabled -Dtray=disabled \
+            -Dswaybar=false -Dswaynag=false -Dgdk-pixbuf=disabled "${meson_extra[@]}" ||
+            die "Sway Meson configuration failed after recovery"
+    fi
+    [[ -f "$BUILD/build.ninja" ]] || die "Sway Meson did not create build.ninja"
 fi
 ninja -C "$BUILD" sway/sway
 

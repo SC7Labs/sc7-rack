@@ -8,180 +8,85 @@ XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 XDG_BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
 
-INSTALL_FAILED=false
+# Install user files as the calling desktop user. Only package installation
+# needs sudo; running the whole installer as root would configure /root.
+if (( EUID == 0 )); then
+    echo "Run ./install.sh as your normal desktop user, without sudo." >&2
+    echo "The installer will ask for your password when packages are needed." >&2
+    exit 1
+fi
+PACKAGE_INSTALLER="$SCRIPT_DIR/scripts/install-packages.sh"
+[[ -x "$PACKAGE_INSTALLER" ]] || {
+    echo "ERROR: Package installer is missing: $PACKAGE_INSTALLER" >&2
+    exit 1
+}
 
-# ─── Phase 1: Validate mandatory runtime dependencies ───────────────────────
+# ─── Phase 1: Install and validate runtime dependencies ─────────────────────
 
 echo ""
-echo "── Checking mandatory runtime dependencies ──"
+echo "── Checking runtime dependencies ──"
 
-# Mandatory commands and their apt package mappings (empty = no known apt package)
 declare -A APT_PACKAGES=(
-    [sway]="sway"
-    [swaymsg]=""        # provided by sway package
-    [cosmic-term]=""    # COSMIC desktop component
-    [cosmic-files]=""   # COSMIC desktop component
-    [cosmic-monitor]="" # COSMIC desktop component
-    [htop]="htop"
-    [python3]="python3"
-    [xdg-open]="xdg-utils"
+    [sway]="sway" [swaymsg]="sway"
+    [cosmic-term]="cosmic-term" [cosmic-files]="cosmic-files"
+    [cosmic-monitor]="cosmic-monitor" [htop]="htop"
+    [python3]="python3" [xdg-open]="xdg-utils"
+    [fuser]="psmisc" [pgrep]="procps"
 )
-
-MANDATORY_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3 xdg-open)
-MISSING_CMDS=()
+MANDATORY_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3 xdg-open fuser pgrep)
 APT_INSTALLABLE=()
-COSMIC_MISSING=()
-
+COSMIC_PRESENT=false
+rack_desktop="${XDG_CURRENT_DESKTOP:-}"
+if [[ "${rack_desktop^^}" == *COSMIC* ]] ||
+        command -v cosmic-comp >/dev/null 2>&1 || command -v cosmic-session >/dev/null 2>&1; then
+    COSMIC_PRESENT=true
+fi
 for cmd in "${MANDATORY_CMDS[@]}"; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        MISSING_CMDS+=("$cmd")
+    if command -v "$cmd" >/dev/null 2>&1; then
+        echo "  ✓ $cmd"
+    else
         case "$cmd" in
             cosmic-term|cosmic-files|cosmic-monitor)
-                COSMIC_MISSING+=("$cmd")
-                ;;
-            *)
-                pkg="${APT_PACKAGES[$cmd]:-}"
-                if [[ -n "$pkg" ]]; then
-                    APT_INSTALLABLE+=("$pkg")
+                if [[ "$COSMIC_PRESENT" != true ]]; then
+                    echo "ERROR: SC7Labs Rack requires the COSMIC Wayland desktop." >&2
+                    echo "Use Pop!_OS 24.04 with COSMIC, then rerun ./install.sh." >&2
+                    exit 1
                 fi
                 ;;
         esac
-    else
-        echo "  ✓ $cmd"
+        APT_INSTALLABLE+=("${APT_PACKAGES[$cmd]}")
     fi
 done
-
-# Attempt to install apt-available packages on apt-based systems
-if [[ ${#APT_INSTALLABLE[@]} -gt 0 ]] && command -v apt-get >/dev/null 2>&1; then
-    echo ""
-    echo "The following packages can be installed via apt: ${APT_INSTALLABLE[*]}"
-
-    CAN_SUDO=false
-    if sudo -n true 2>/dev/null; then
-        CAN_SUDO=true
-    fi
-
-    if [[ "$CAN_SUDO" == "true" ]]; then
-        echo "Installing: ${APT_INSTALLABLE[*]}"
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq "${APT_INSTALLABLE[@]}"
-
-        # Re-check which commands are now available
-        NEW_MISSING=()
-        for cmd in "${MISSING_CMDS[@]}"; do
-            case "$cmd" in
-                cosmic-term|cosmic-files|cosmic-monitor)
-                    NEW_MISSING+=("$cmd")
-                    ;;
-                *)
-                    if command -v "$cmd" >/dev/null 2>&1; then
-                        echo "  ✓ $cmd (installed)"
-                    else
-                        NEW_MISSING+=("$cmd")
-                    fi
-                    ;;
-            esac
-        done
-        MISSING_CMDS=("${NEW_MISSING[@]}")
-
-        # After installing sway, verify swaymsg is also available
-        if command -v sway >/dev/null 2>&1 && ! command -v swaymsg >/dev/null 2>&1; then
-            echo "  ✗ swaymsg is still missing after installing sway" >&2
-            if [[ ! " ${MISSING_CMDS[*]} " =~ " swaymsg " ]]; then
-                MISSING_CMDS+=("swaymsg")
-            fi
-        fi
-    else
-        echo ""
-        echo "Cannot install packages automatically (no passwordless sudo)."
-        echo "Please install manually:"
-        for pkg in "${APT_INSTALLABLE[@]}"; do
-            echo "  sudo apt install $pkg"
-        done
-    fi
+if (( ${#APT_INSTALLABLE[@]} > 0 )); then
+    mapfile -t APT_INSTALLABLE < <(printf '%s\n' "${APT_INSTALLABLE[@]}" | sort -u)
+    "$PACKAGE_INSTALLER" "${APT_INSTALLABLE[@]}" || {
+        echo "ERROR: Runtime package installation failed. Rerun ./install.sh after resolving the error above." >&2
+        exit 1
+    }
 fi
-
-# Stop if COSMIC components are missing
-if [[ ${#COSMIC_MISSING[@]} -gt 0 ]]; then
-    echo "" >&2
-    echo "════════════════════════════════════════════════════════════" >&2
-    echo "  ERROR: Missing COSMIC desktop components" >&2
-    echo "════════════════════════════════════════════════════════════" >&2
-    echo "" >&2
-    echo "  SC7Labs Rack currently requires a COSMIC desktop environment." >&2
-    echo "" >&2
-    echo "  Missing commands:" >&2
-    for cmd in "${COSMIC_MISSING[@]}"; do
-        echo "    ✗ $cmd" >&2
-    done
-    echo "" >&2
-    echo "  These are part of the COSMIC desktop (https://system76.com/cosmic)." >&2
-    echo "  Please install COSMIC and try again." >&2
-    echo "════════════════════════════════════════════════════════════" >&2
-    exit 1
-fi
-
-# Stop if any other mandatory dependencies are still missing
-NON_COSMIC_MISSING=()
-for cmd in "${MISSING_CMDS[@]}"; do
-    case "$cmd" in
-        cosmic-term|cosmic-files|cosmic-monitor) ;; # already handled above
-        *) NON_COSMIC_MISSING+=("$cmd") ;;
-    esac
+for cmd in "${MANDATORY_CMDS[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "ERROR: Required command '$cmd' is still missing after package installation." >&2
+        exit 1
+    fi
 done
+echo "All runtime dependencies satisfied."
 
-if [[ ${#NON_COSMIC_MISSING[@]} -gt 0 ]]; then
-    echo "" >&2
-    echo "════════════════════════════════════════════════════════════" >&2
-    echo "  ERROR: Missing mandatory runtime dependencies" >&2
-    echo "════════════════════════════════════════════════════════════" >&2
-    echo "" >&2
-    echo "  The following required commands are not available:" >&2
-    for cmd in "${NON_COSMIC_MISSING[@]}"; do
-        echo "    ✗ $cmd" >&2
-    done
-    echo "" >&2
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "  Install with:  sudo apt install sway htop python3 xdg-utils" >&2
-    elif command -v dnf >/dev/null 2>&1; then
-        echo "  Install with:  sudo dnf install sway htop python3" >&2
-    elif command -v pacman >/dev/null 2>&1; then
-        echo "  Install with:  sudo pacman -S sway htop python3" >&2
-    fi
-    echo "════════════════════════════════════════════════════════════" >&2
-    exit 1
-fi
+# ─── Phase 1b: Install the graphical Settings dependency ────────────────────
 
 echo ""
-echo "All mandatory runtime dependencies satisfied."
-
-# ─── Phase 1b: Check Python Tkinter (optional but helpful) ──────────────────
-
-echo ""
-echo "── Checking Python Tkinter ──"
+echo "── Checking graphical Settings support ──"
 if ! python3 -c "import tkinter" >/dev/null 2>&1; then
-    echo "Notice: Python Tkinter (python3-tk) is not installed."
-    echo "The graphical settings window requires python3-tk."
-    if sudo -n true 2>/dev/null && command -v apt-get >/dev/null 2>&1; then
-        echo "Attempting non-interactive install of python3-tk via apt..."
-        sudo apt-get install -y -qq python3-tk || true
-    fi
-    if ! python3 -c "import tkinter" >/dev/null 2>&1; then
-        echo "To use the GUI settings window, please install python3-tk:"
-        if command -v apt-get >/dev/null 2>&1; then
-            echo "  sudo apt install python3-tk"
-        elif command -v dnf >/dev/null 2>&1; then
-            echo "  sudo dnf install python3-tkinter"
-        elif command -v pacman >/dev/null 2>&1; then
-            echo "  sudo pacman -S tk"
-        fi
-        echo "Settings can still be managed via CLI: sc7-rack-settings --status"
-    else
-        echo "  ✓ python3-tk installed successfully."
-    fi
-else
-    echo "  ✓ Python Tkinter support: OK"
+    "$PACKAGE_INSTALLER" python3-tk || {
+        echo "ERROR: Could not install the graphical Settings dependency." >&2
+        exit 1
+    }
 fi
+if ! python3 -c "import tkinter" >/dev/null 2>&1; then
+    echo "ERROR: Python Tkinter is still unavailable; graphical Settings cannot start." >&2
+    exit 1
+fi
+echo "  ✓ Python Tkinter support: OK"
 
 # ─── Phase 1c: Report optional GPU tools ────────────────────────────────────
 
@@ -260,7 +165,13 @@ echo "── Building clipboard bridge ──"
     echo "  ERROR: Clipboard bridge build dependencies are unavailable." >&2
     exit 1
 }
-make -C "$SCRIPT_DIR/bridge"
+# The repository can contain a prebuilt bridge with checkout timestamps newer
+# than its source. Always build for this machine and its installed Wayland ABI.
+make -B -C "$SCRIPT_DIR/bridge"
+if [[ ! -x "$SCRIPT_DIR/bin/sc7-clipboard-bridge" ]]; then
+    echo "ERROR: Clipboard bridge build did not produce an executable." >&2
+    exit 1
+fi
 
 # ─── Phase 4: Setup sudo rule for intel_gpu_top (optional) ──────────────────
 
@@ -328,22 +239,13 @@ fi
 
 # ─── Phase 8: Install .desktop launchers ─────────────────────────────────────
 
-cp "$SCRIPT_DIR/desktop/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack.desktop"
-cp "$SCRIPT_DIR/desktop/sc7-rack-settings.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
-ln -sf sc7-rack.desktop "$XDG_DATA_HOME/applications/dev.sc7labs.rack.desktop"
-chmod 644 "$XDG_DATA_HOME/applications/sc7-rack.desktop" "$XDG_DATA_HOME/applications/sc7-rack-settings.desktop"
+# Absolute Exec paths work immediately in an existing desktop session whose
+# PATH does not yet include the newly created user bin directories.
+python3 "$SCRIPT_DIR/scripts/install_launchers.py"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$XDG_DATA_HOME/applications" 2>/dev/null || true
 fi
-
-# ─── Phase 9: Add shell alias ─────────────────────────────────────────────────
-
-for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
-    if [[ -f "$rc" ]] && ! grep -qF "alias rack=" "$rc" 2>/dev/null; then
-        printf "\nalias rack='sc7-rack'\n" >> "$rc"
-    fi
-done
 
 # ─── Phase 10: Post-install runtime validation ──────────────────────────────
 
@@ -402,7 +304,7 @@ fi
 
 echo ""
 echo "SC7Labs Rack installed successfully."
-echo "Launch via COSMIC App Menu: 'SC7Labs Rack' or 'SC7Labs Rack Settings'"
+echo "Launch now with ./bin/sc7-rack, or via COSMIC App Menu: 'SC7Labs Rack' or 'SC7Labs Rack Settings'"
 echo "CLI Commands:"
 echo "  sc7-rack             - Launch SC7Labs Rack"
 echo "  sc7-rack-settings    - Manage settings (GUI / CLI)"

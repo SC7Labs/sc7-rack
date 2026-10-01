@@ -90,24 +90,51 @@ A deep technical audit was conducted regarding cross-compositor Drag-and-Drop be
 ## Installation & Quickstart
 
 ### Installation
-Clone the repository and run the installer script:
+Use a normal user terminal on **Pop!_OS 24.04 with the COSMIC Wayland desktop**.
+You need internet access and permission to install packages with `sudo`.
+On a fresh system, install Git, clone the repository, then run Rack's installer:
+
 ```bash
+sudo apt update
+sudo apt install -y git
 git clone https://github.com/SC7Labs/sc7-rack.git
 cd sc7-rack
 ./install.sh
+./bin/sc7-rack
 ```
 
+Run `./install.sh` without `sudo`; it asks for your password when system packages
+are missing. No Git name, email, signing key, or manual development-package setup
+is required. Keep the clone in place: the installed launchers use its local builds.
+
 This will:
-1. Check mandatory dependencies (`sway`, `swaymsg`, COSMIC desktop components, `htop`, `python3`).
-2. Check the pinned wlroots build requirements. On Pop!_OS, Ubuntu, and Debian, the installer uses `sudo` to install only missing required apt packages, then checks them again. Build patched wlroots locally for SC7Labs DnD and compositor lifecycle, then build a pinned local Sway with the popup lifecycle fix. System wlroots and `/usr/bin/sway` are **never replaced**. Rerunning `./install.sh` resumes verified partial builds.
-3. Build `sc7-clipboard-bridge` from clean C source.
+1. Install missing runtime tools, COSMIC application packages when the desktop is present, and the Python Tkinter dependency for graphical Settings.
+2. Install missing build requirements, including C headers and EGL/GLES2/GBM development packages, and verify them before compiling. Build patched wlroots locally for SC7Labs DnD and compositor lifecycle, then build a pinned local Sway with the popup lifecycle fix. System wlroots and `/usr/bin/sway` are **never replaced**. Rerunning `./install.sh` resumes verified partial builds.
+3. Rebuild `sc7-clipboard-bridge` from source for the current machine.
 4. Link binaries to `~/.local/bin` and `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
 5. Setup Sway configuration in `~/.config/sc7-rack/`.
 6. Install FreeDesktop hicolor application icons and `.desktop` launchers for COSMIC App Library.
-7. Configure the `rack` shell alias.
+7. Configure the `rack` shell alias in existing Bash/Zsh settings, preserving a user-defined alias.
+
+The COSMIC App Library entries work immediately, even if your current session
+does not yet include `~/.local/bin` in `PATH`. Use `./bin/sc7-rack` from the clone
+for the first terminal launch; open a new terminal to load the `rack` alias.
+GPU monitoring utilities are optional: Rack keeps all four panes when none is installed.
+
+After installation, verify the local compositor with:
+
+```bash
+./scripts/bootstrap-sway.sh --check
+```
+
+To update or retry an interrupted installation, run `./install.sh` again.
+Existing user settings are preserved.
 
 > **Note:** SC7Labs Rack targets the **COSMIC Desktop Environment on Wayland** (System76 COSMIC).
 > Generic Ubuntu/Wayland support is not guaranteed.
+
+The clean build and fresh-user installer checks are recorded in
+[`docs/FRESH_INSTALL_VALIDATION.md`](docs/FRESH_INSTALL_VALIDATION.md).
 
 
 ### Launching SC7Labs Rack

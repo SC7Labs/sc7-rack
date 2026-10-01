@@ -145,6 +145,10 @@ if RUNNING_PID="$(get_running_rack_pid)"; then
 fi
 
 # Ensure host Wayland display is discovered dynamically and preserved
+if ! command -v fuser >/dev/null 2>&1; then
+    echo "Error: fuser is unavailable. Run ./install.sh to install the psmisc dependency." >&2
+    exit 1
+fi
 HOST_DISP="${WAYLAND_DISPLAY:-${SC7_HOST_WAYLAND_DISPLAY:-}}"
 if [[ -z "$HOST_DISP" ]]; then
     for lockfile in "$RUNTIME_DIR"/wayland-[0-9]*.lock; do
@@ -284,5 +288,7 @@ echo "$SWAY_PID" > "$PID_FILE"
 
 trap cleanup EXIT INT TERM HUP
 
-wait "$SWAY_PID" 2>/dev/null || true
+SWAY_STATUS=0
+wait "$SWAY_PID" 2>/dev/null || SWAY_STATUS=$?
 cleanup
+exit "$SWAY_STATUS"

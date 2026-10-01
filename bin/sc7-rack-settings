@@ -36,6 +36,8 @@ AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "sc7-rack.desktop")
 REAL_PATH = os.path.realpath(__file__)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(REAL_PATH))
 ICON_PATH = os.path.join(PROJECT_ROOT, "assets/icons/sc7-rack-128.png")
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
+from install_launchers import desktop_exec
 
 DEFAULT_SETTINGS = {
     "autostart": False,
@@ -71,7 +73,7 @@ def save_settings(settings):
 def sync_autostart(enabled):
     os.makedirs(AUTOSTART_DIR, exist_ok=True)
     if enabled:
-        exec_path = "sc7-rack"
+        exec_path = desktop_exec([os.path.join(PROJECT_ROOT, "bin", "sc7-rack")])
         content = (
             "[Desktop Entry]\n"
             "Type=Application\n"
