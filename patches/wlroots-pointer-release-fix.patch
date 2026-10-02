@@ -1,0 +1,221 @@
+diff --git a/backend/wayland/dnd.c b/backend/wayland/dnd.c
+index a0b8ada..2cba7f8 100644
+--- a/backend/wayland/dnd.c
++++ b/backend/wayland/dnd.c
+@@ -52,6 +52,8 @@ struct proxy_data_source {
+ 
+ struct wlr_wl_outgoing_drag {
+ 	struct wlr_wl_backend *backend;
++	struct wlr_wl_seat *seat;
++	uint32_t button;
+ 	struct wlr_drag *wlr_drag;
+ 	struct wl_data_source *host_source;
+ 	struct host_data_offer *self_offer;
+@@ -603,6 +605,8 @@ static void outgoing_source_handle_cancelled(void *data, struct wl_data_source *
+ 			wlr_drag_destroy(od->wlr_drag);
+ 			od->wlr_drag = NULL;
+ 		}
++		wlr_wl_pointer_release_button(od->seat, od->button,
++			(uint32_t)get_current_time_msec());
+ 		wl_data_source_destroy(source);
+ 		free(od);
+ 	}
+@@ -640,6 +644,8 @@ static void outgoing_source_handle_dnd_finished(void *data, struct wl_data_sourc
+ 			wlr_drag_destroy(od->wlr_drag);
+ 			od->wlr_drag = NULL;
+ 		}
++		wlr_wl_pointer_release_button(od->seat, od->button,
++			(uint32_t)get_current_time_msec());
+ 		wl_data_source_destroy(source);
+ 		free(od);
+ 	}
+@@ -682,6 +688,8 @@ static void handle_outgoing_drag_destroy(struct wl_listener *listener, void *dat
+ 			wl_data_source_destroy(od->host_source);
+ 			od->host_source = NULL;
+ 		}
++		wlr_wl_pointer_release_button(od->seat, od->button,
++			(uint32_t)get_current_time_msec());
+ 		free(od);
+ 	}
+ }
+@@ -741,6 +749,8 @@ void wlr_wl_backend_start_parent_drag(struct wlr_wl_backend *wl, struct wlr_drag
+ 
+ 	od->icon_fd = -1;
+ 	od->backend = wl;
++	od->seat = seat;
++	od->button = seat->last_button;
+ 	od->wlr_drag = drag;
+ 	od->host_source = wl_data_device_manager_create_data_source(wl->data_device_manager);
+ 	if (!od->host_source) {
+@@ -1123,6 +1133,12 @@ void init_seat_dnd(struct wlr_wl_seat *seat) {
+ 
+ void finish_seat_dnd(struct wlr_wl_seat *seat) {
+ 	if (seat->backend) {
++		// Pointer teardown balances any outstanding press before this seat is
++		// freed. A later host source callback must not dereference that seat.
++		if (seat->backend->outgoing_drag &&
++				seat->backend->outgoing_drag->seat == seat) {
++			seat->backend->outgoing_drag->seat = NULL;
++		}
+ 		struct host_data_offer *ho, *tmp;
+ 		wl_list_for_each_safe(ho, tmp, &seat->backend->dnd_offers, link) {
+ 			host_data_offer_destroy(ho);
+diff --git a/backend/wayland/pointer.c b/backend/wayland/pointer.c
+index 3e2244a..a6bd70e 100644
+--- a/backend/wayland/pointer.c
++++ b/backend/wayland/pointer.c
+@@ -10,6 +10,55 @@
+ 
+ #include "pointer-gestures-unstable-v1-client-protocol.h"
+ #include "relative-pointer-unstable-v1-client-protocol.h"
++#include "util/time.h"
++
++// A host drag can consume the release of the button which started it. Keep
++// the exact nested pointer which received each press so a later release can
++// balance Sway's button state even after wl_pointer.leave cleared focus.
++struct wlr_wl_pressed_button {
++	struct wlr_wl_pointer *pointer;
++	uint32_t button;
++	struct wl_list link;
++};
++
++static struct wlr_wl_pressed_button *find_pressed_button(
++		struct wlr_wl_seat *seat, uint32_t button) {
++	struct wlr_wl_pressed_button *pressed;
++	wl_list_for_each(pressed, &seat->pressed_buttons, link) {
++		if (pressed->button == button) {
++			return pressed;
++		}
++	}
++	return NULL;
++}
++
++static void release_pressed_button(struct wlr_wl_seat *seat,
++		struct wlr_wl_pressed_button *pressed, uint32_t time) {
++	struct wlr_wl_pointer *pointer = pressed->pointer;
++	uint32_t button = pressed->button;
++	wl_list_remove(&pressed->link);
++	free(pressed);
++	seat->button_is_down = !wl_list_empty(&seat->pressed_buttons);
++
++	struct wlr_pointer_button_event event = {
++		.pointer = &pointer->wlr_pointer,
++		.button = button,
++		.state = WLR_BUTTON_RELEASED,
++		.time_msec = time,
++	};
++	wl_signal_emit_mutable(&pointer->wlr_pointer.events.button, &event);
++}
++
++void wlr_wl_pointer_release_button(struct wlr_wl_seat *seat,
++		uint32_t button, uint32_t time) {
++	if (seat == NULL) {
++		return;
++	}
++	struct wlr_wl_pressed_button *pressed = find_pressed_button(seat, button);
++	if (pressed != NULL) {
++		release_pressed_button(seat, pressed, time);
++	}
++}
+ 
+ static struct wlr_wl_pointer *output_get_pointer(struct wlr_wl_output *output,
+ 		const struct wl_pointer *wl_pointer) {
+@@ -71,12 +120,12 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
+ 		return;
+ 	}
+ 
+-	if (seat->active_pointer != NULL &&
+-			seat->active_pointer->output == output) {
++	struct wlr_wl_pointer *pointer = output_get_pointer(output, wl_pointer);
++	if (seat->active_pointer == pointer) {
+ 		seat->active_pointer = NULL;
+ 	}
+ 
+-	if (output->cursor.pointer == seat->active_pointer) {
++	if (output->cursor.pointer == pointer) {
+ 		output->enter_serial = 0;
+ 		output->cursor.pointer = NULL;
+ 	}
+@@ -104,19 +153,31 @@ static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
+ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
+ 		uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
+ 	struct wlr_wl_seat *seat = data;
++	if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
++		// A release may arrive after leave, when active_pointer is NULL.
++		wlr_wl_pointer_release_button(seat, button, time);
++		return;
++	}
++	struct wlr_wl_pointer *pointer = seat->active_pointer;
++	if (pointer == NULL || find_pressed_button(seat, button) != NULL) {
++		return;
++	}
++	struct wlr_wl_pressed_button *pressed = calloc(1, sizeof(*pressed));
++	if (pressed == NULL) {
++		wlr_log(WLR_ERROR, "failed to track Wayland pointer button press");
++		return;
++	}
++	pressed->pointer = pointer;
++	pressed->button = button;
++	wl_list_insert(&seat->pressed_buttons, &pressed->link);
+ 	seat->last_button_serial = serial;
+ 	seat->last_button = button;
+-	seat->button_is_down = (state == WL_POINTER_BUTTON_STATE_PRESSED);
++	seat->button_is_down = true;
+ 
+-	fprintf(stderr, "[sc7-dnd] host pointer button: seat=%p ('%s'), serial=%u, button=0x%x, state=%u (down=%d)\n",
+-		(void *)seat, seat->name ? seat->name : "unnamed", serial, button, state, seat->button_is_down);
++	fprintf(stderr, "[sc7-dnd] host pointer button: seat=%p ('%s'), serial=%u, button=0x%x, state=%u\n",
++		(void *)seat, seat->name ? seat->name : "unnamed", serial, button, state);
+ 	fflush(stderr);
+ 
+-	struct wlr_wl_pointer *pointer = seat->active_pointer;
+-	if (pointer == NULL) {
+-		return;
+-	}
+-
+ 	struct wlr_pointer_button_event event = {
+ 		.pointer = &pointer->wlr_pointer,
+ 		.button = button,
+@@ -445,6 +506,13 @@ const struct wlr_pointer_impl wl_pointer_impl = {
+ };
+ 
+ static void destroy_pointer(struct wlr_wl_pointer *pointer) {
++	struct wlr_wl_pressed_button *pressed, *tmp;
++	wl_list_for_each_safe(pressed, tmp, &pointer->seat->pressed_buttons, link) {
++		if (pressed->pointer == pointer) {
++			release_pressed_button(pointer->seat, pressed,
++				(uint32_t)get_current_time_msec());
++		}
++	}
+ 	if (pointer->output->cursor.pointer == pointer) {
+ 		pointer->output->cursor.pointer = NULL;
+ 	}
+@@ -507,6 +575,7 @@ void init_seat_pointer(struct wlr_wl_seat *seat) {
+ 	struct wlr_wl_backend *backend = seat->backend;
+ 
+ 	wl_list_init(&seat->pointers);
++	wl_list_init(&seat->pressed_buttons);
+ 
+ 	struct wlr_wl_output *output;
+ 	wl_list_for_each(output, &backend->outputs, link) {
+diff --git a/include/backend/wayland.h b/include/backend/wayland.h
+index 1844b38..4a56f00 100644
+--- a/include/backend/wayland.h
++++ b/include/backend/wayland.h
+@@ -143,6 +143,7 @@ struct wlr_wl_seat {
+ 	struct wl_pointer *wl_pointer;
+ 	struct wlr_wl_pointer *active_pointer;
+ 	struct wl_list pointers; // wlr_wl_pointer.link
++	struct wl_list pressed_buttons; // wlr_wl_pressed_button.link
+ 
+ 	struct zwp_pointer_gesture_swipe_v1 *gesture_swipe;
+ 	struct zwp_pointer_gesture_pinch_v1 *gesture_pinch;
+@@ -193,6 +194,8 @@ void wlr_wl_backend_promote_pending_drag(struct wlr_wl_backend *wl);
+ struct wlr_wl_backend *wlr_wl_backend_find_by_display(struct wl_display *local_display);
+ void wlr_wl_pointer_handle_motion(struct wlr_wl_seat *seat, uint32_t time,
+ 	wl_fixed_t sx, wl_fixed_t sy);
++void wlr_wl_pointer_release_button(struct wlr_wl_seat *seat,
++	uint32_t button, uint32_t time);
+ 
+ bool create_wl_seat(struct wl_seat *wl_seat, struct wlr_wl_backend *wl,
+ 	uint32_t global_name);

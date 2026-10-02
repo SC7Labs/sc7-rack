@@ -16,6 +16,19 @@ int64_t get_current_time_msec(void) {
 	return 1;
 }
 
+// Observe the DnD terminal callbacks without manufacturing a Wayland input
+// device. The pointer backend's actual press/release ledger is exercised by
+// pointer_backend_tests.py.
+static int balanced_releases;
+static struct wlr_wl_seat *last_release_seat;
+static uint32_t last_release_button;
+void wlr_wl_pointer_release_button(struct wlr_wl_seat *seat,
+		uint32_t button, uint32_t time) {
+	balanced_releases++;
+	last_release_seat = seat;
+	last_release_button = button;
+}
+
 struct wlr_wl_output *get_wl_output_from_surface(struct wlr_wl_backend *wl,
 		struct wl_surface *surface) {
 	return NULL;
@@ -346,6 +359,7 @@ static bool test_forward_worker(void) {
 static bool test_outgoing_offer_endings(void) {
 	struct fixture f;
 	CHECK(fixture_init(&f));
+	balanced_releases = 0;
 	int baseline_fds = count_open_fds();
 	CHECK(baseline_fds > 0);
 	for (int i = 0; i < 120; i++) {
@@ -354,6 +368,8 @@ static bool test_outgoing_offer_endings(void) {
 		struct wlr_wl_outgoing_drag *od = calloc(1, sizeof(*od));
 		CHECK(od != NULL);
 		od->backend = &f.backend;
+		od->seat = &f.seat;
+		od->button = 0x110;
 		od->self_offer = ho;
 		od->icon_fd = -1;
 		f.backend.outgoing_drag = od;
@@ -367,6 +383,9 @@ static bool test_outgoing_offer_endings(void) {
 		}
 		CHECK(f.backend.outgoing_drag == NULL);
 		CHECK(wl_list_empty(&f.backend.dnd_offers));
+		CHECK(balanced_releases == i + 1);
+		CHECK(last_release_seat == &f.seat);
+		CHECK(last_release_button == 0x110);
 	}
 	CHECK(count_open_fds() <= baseline_fds + 2);
 	fixture_finish(&f);
@@ -376,6 +395,7 @@ static bool test_outgoing_offer_endings(void) {
 static bool test_outgoing_leave(void) {
 	struct fixture f;
 	CHECK(fixture_init(&f));
+	balanced_releases = 0;
 	int baseline_fds = count_open_fds();
 	CHECK(baseline_fds > 0);
 	for (int i = 0; i < 120; i++) {
@@ -384,6 +404,8 @@ static bool test_outgoing_leave(void) {
 		struct wlr_wl_outgoing_drag *od = calloc(1, sizeof(*od));
 		CHECK(od != NULL);
 		od->backend = &f.backend;
+		od->seat = &f.seat;
+		od->button = 0x110;
 		od->self_offer = ho;
 		od->icon_fd = -1;
 		od->host_source = (struct wl_data_source *)wl_proxy_create(
@@ -398,8 +420,10 @@ static bool test_outgoing_leave(void) {
 		data_device_handle_leave(&f.seat, NULL);
 		CHECK(od->self_offer == NULL);
 		CHECK(wl_list_empty(&f.backend.dnd_offers));
+		CHECK(balanced_releases == i);
 		wlr_drag_destroy(drag);
 		CHECK(f.backend.outgoing_drag == NULL);
+		CHECK(balanced_releases == i + 1);
 	}
 	CHECK(count_open_fds() <= baseline_fds + 2);
 	fixture_finish(&f);

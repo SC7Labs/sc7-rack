@@ -20,9 +20,9 @@ import tempfile
 REPO = Path(__file__).resolve().parents[1]
 VENDOR = REPO / "vendor" / "wlroots"
 INCREMENTAL = REPO / "patches" / "wlroots-dnd-lifetime-fix.patch"
+POINTER_FIX = REPO / "patches" / "wlroots-pointer-release-fix.patch"
 FULL = REPO / "patches" / "wlroots-sc7labs-rack.patch"
 BASE = (REPO / "patches" / "WLROOTS_BASE_REVISION").read_text().strip()
-LEGACY_ID = (REPO / "patches" / "WLROOTS_LEGACY_PATCH_ID").read_text().strip()
 
 
 def run(*args: str, cwd: Path | None = None, input: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -33,20 +33,22 @@ def patch_id(patch: bytes) -> str:
     return run("git", "patch-id", "--stable", input=patch).stdout.decode().split()[0]
 
 
-def prepared_source(root: Path, *, reverse: bool) -> Path:
-    source = root / ("legacy" if reverse else "updated")
+def prepared_legacy_source(root: Path) -> Path:
+    source = root / "legacy"
     for name in ("backend/wayland/dnd.c", "include/backend/wayland.h"):
         target = source / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(VENDOR / name, target)
-    command = ["git", "apply"]
-    if reverse:
-        command.append("-R")
-    command.append(str(INCREMENTAL))
     environment = os.environ.copy()
     environment["GIT_CEILING_DIRECTORIES"] = str(REPO)
-    subprocess.run(command, cwd=source, env=environment, check=True,
-                   capture_output=True)
+    # The old DnD patch predates the pointer fix. Reverse both migrations in
+    # order on disposable copies, without changing the installed checkout.
+    for patch in (POINTER_FIX, INCREMENTAL):
+        subprocess.run([
+            "git", "apply", "-R",
+            "--include=backend/wayland/dnd.c",
+            "--include=include/backend/wayland.h", str(patch),
+        ], cwd=source, env=environment, check=True, capture_output=True)
     return source
 
 
@@ -106,28 +108,22 @@ def main() -> int:
     run("git", "-C", str(VENDOR), "diff", "--cached", "--quiet")
     current = patch_id(run("git", "-C", str(VENDOR), "diff", "--binary", BASE, "HEAD").stdout)
     updated = patch_id(FULL.read_bytes())
-    if current not in (LEGACY_ID, updated):
+    if current != updated:
         print(f"Unexpected local wlroots source patch ID: {current}", file=sys.stderr)
         return 2
-    if current == updated:
-        stamp = build / ".sc7-patch-id"
-        if not stamp.is_file() or stamp.read_text().strip() != updated:
-            print("Local wlroots source is updated but its library has not been verified for this patch; run ./scripts/bootstrap-wlroots.sh first.",
-                  file=sys.stderr)
-            return 2
+    stamp = build / ".sc7-patch-id"
+    if not stamp.is_file() or stamp.read_text().strip() != updated:
+        print("Local wlroots source is updated but its library has not been verified for this patch; run ./scripts/bootstrap-wlroots.sh first.",
+              file=sys.stderr)
+        return 2
     entries = json.loads(database.read_text())
     entry = next(e for e in entries if e["file"].endswith("backend/wayland/dnd.c"))
-    # The host checkout may still have the legacy source. Apply/reverse the
-    # small migration to disposable copies, then exercise both implementations.
+    # Exercise both current callbacks and the historic leak in disposable
+    # source copies.
     with tempfile.TemporaryDirectory(prefix="sc7-dnd-lifetime-", dir=REPO) as temporary:
         work = Path(temporary)
-        if current == LEGACY_ID:
-            old_source = VENDOR
-            new_source = prepared_source(work, reverse=False)
-        else:
-            new_source = VENDOR
-            old_source = prepared_source(work, reverse=True)
-        print(compile_and_run(new_source, "dnd_lifetime_harness.c", work, entry))
+        old_source = prepared_legacy_source(work)
+        print(compile_and_run(VENDOR, "dnd_lifetime_harness.c", work, entry))
         print(compile_and_run(old_source, "dnd_lifetime_negative_control.c", work, entry))
     return 0
 
