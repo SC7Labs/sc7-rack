@@ -75,10 +75,24 @@ assert_true "Repo Sway config contains floating rule for FileRoller" \
     "grep -q 'app_id=\"org.gnome.FileRoller\"\] floating enable' '$SWAY_CONFIG'"
 assert_true "Repo Sway config contains floating rule for Evince" \
     "grep -q 'app_id=\"org.gnome.Evince\"\] floating enable' '$SWAY_CONFIG'"
-assert_true "Repo Sway config contains floating rule for dialog roles" \
-    "grep -q 'window_type=\"dialog\"\] floating enable' '$SWAY_CONFIG'"
+assert_true "Repo Sway config contains floating rule for dialog app_ids" \
+    "grep -q 'app_id=\"(?i).*dialog.*\"\] floating enable' '$SWAY_CONFIG'"
+assert_true "Repo Sway config does not contain stale XWayland window_role rules" \
+    "! grep -q 'window_role=' '$SWAY_CONFIG'"
+assert_true "Repo Sway config does not contain stale XWayland window_type rules" \
+    "! grep -q 'window_type=' '$SWAY_CONFIG'"
 assert_true "Inner script has view guard to prevent duplicate tiling on reload" \
     "grep -q 'CURRENT_VIEWS=' '$SCRIPT_DIR/config/inner.sh'"
+
+SWAY_BIN="${SC7_RACK_SWAY_BINARY:-$SCRIPT_DIR/vendor/sway/build/sway/sway}"
+if [[ -x "$SWAY_BIN" ]]; then
+    assert_true "Rack-local Sway parser validates repo config with zero errors" \
+        "XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/tmp}' WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 '$SWAY_BIN' -C -c '$SWAY_CONFIG' >/dev/null 2>&1"
+    if [[ -f "$USER_SWAY_CONFIG" ]]; then
+        assert_true "Rack-local Sway parser validates user config with zero errors" \
+            "XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-/tmp}' WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 '$SWAY_BIN' -C -c '$USER_SWAY_CONFIG' >/dev/null 2>&1"
+    fi
+fi
 
 # 3. File Operations & Unicode / Spaces
 echo "--- Category 3: File Operations, Spaces & Unicode ---"

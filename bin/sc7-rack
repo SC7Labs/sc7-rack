@@ -226,6 +226,9 @@ CONFIG_FILE="$CONFIG_DIR/config"
 if [[ ! -f "$CONFIG_FILE" ]]; then
     mkdir -p "$CONFIG_DIR"
     cp "$PROJECT_ROOT/config/config" "$CONFIG_FILE"
+elif grep -q -E 'window_role|window_type' "$CONFIG_FILE"; then
+    # Obsolete X11/XWayland criteria cause config parser errors in Rack Sway (built without XWayland).
+    sed -i -E '/for_window \[(window_role|window_type)=/d' "$CONFIG_FILE"
 fi
 # Keep the installed helper in step with the launcher. Otherwise an existing
 # installation keeps polling a stale Sway socket after the source is updated.

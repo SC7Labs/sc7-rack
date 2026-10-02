@@ -48,9 +48,19 @@ else
     log_fail 3 "Binaries missing or not executable"
 fi
 
-# Gate 4: Sway config exists
+# Gate 4: Sway config exists and validates cleanly with Rack-local Sway parser
+SWAY_BIN="${SC7_RACK_SWAY_BINARY:-$PROJECT_ROOT/vendor/sway/build/sway/sway}"
 if [[ -f "$PROJECT_ROOT/config/config" && -f "$PROJECT_ROOT/config/inner.sh" ]]; then
-    log_pass 4 "Nested Sway configuration and inner spawner exist"
+    if [[ -x "$SWAY_BIN" ]]; then
+        cfg_out="$(XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 "$SWAY_BIN" -C -c "$PROJECT_ROOT/config/config" 2>&1 || true)"
+        if [[ -z "$cfg_out" ]] || ! grep -q -E "Error on line|Token .* is not recognized|Error\(s\) loading config" <<< "$cfg_out"; then
+            log_pass 4 "Nested Sway configuration exists and validates with zero parser errors"
+        else
+            log_fail 4 "Nested Sway configuration has parser errors: $cfg_out"
+        fi
+    else
+        log_pass 4 "Nested Sway configuration and inner spawner exist"
+    fi
 else
     log_fail 4 "Config files missing"
 fi

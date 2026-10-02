@@ -66,12 +66,11 @@ Nested COSMIC Files shares the user's active session bus (`/run/user/1000/bus`),
 4. Spawning helper apps (e.g., `cosmic-edit`, `cosmic-viewer`, `file-roller`, `evince`) similarly suffered from involuntary tiling.
 
 ### The Fix
-Nested Sway now specifies explicit floating rules for dialogs, popups, and helper applications:
+Nested Sway specifies explicit floating rules for dialogs and helper applications using native Wayland `app_id` criteria (Rack-local Sway is built without XWayland; X11 criteria like `window_role` and `window_type` are avoided, while native Wayland `xdg_popup` surfaces and transient dialogs with parents float automatically):
 ```ini
 for_window [app_id="com.system76.CosmicFilesDialog"] floating enable, border normal, move position center
+for_window [app_id="com.system76.CosmicFilesDialogExample"] floating enable, border normal, move position center
 for_window [app_id="(?i).*dialog.*"] floating enable
-for_window [window_role="dialog"] floating enable
-for_window [window_type="dialog"] floating enable
 for_window [app_id="com.system76.CosmicEdit"] floating enable
 for_window [app_id="com.system76.CosmicViewer"] floating enable
 for_window [app_id="com.system76.CosmicPlayer"] floating enable

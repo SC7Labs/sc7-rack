@@ -160,6 +160,11 @@ def exercise_nested(binary: Path, cycles: int, sway_binary: str,
                     client_environment = dict(nested_environment,
                                               WAYLAND_DISPLAY=nested_socket.name)
                     exercise(binary, cycles, client_environment, nested_log)
+                    nested_log_text = nested_log.read_text(errors="replace")
+                    if "Error(s) loading config!" in nested_log_text or "Error on line" in nested_log_text:
+                        raise RuntimeError(
+                            f"nested Sway reported config errors:\n{nested_log_text[-4000:]}"
+                        )
                     if nested.poll() is not None or host.poll() is not None:
                         raise RuntimeError("A compositor exited during nested popup test")
                 finally:
