@@ -4,7 +4,8 @@ set -euo pipefail
 # Capture the host session before preparing Rack's nested compositor.
 export SC7_HOST_PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}"
 for var in DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS SWAYSOCK I3SOCK \
-           LD_LIBRARY_PATH WLR_BACKENDS WLR_LIBINPUT_NO_DEVICES; do
+           LD_LIBRARY_PATH WLR_BACKENDS WLR_LIBINPUT_NO_DEVICES \
+           WLR_EGL_NO_MODIFIERS; do
     value_name="SC7_HOST_$var"
     set_name="${value_name}_SET"
     printf -v "$value_name" '%s' "${!var-}"
@@ -205,6 +206,10 @@ fi
 # Use Wayland backend for nested operation inside host compositor
 export WLR_BACKENDS=wayland
 export WLR_LIBINPUT_NO_DEVICES=1
+# On physical COSMIC hardware, Rack's explicit DMA-BUF modifier path can
+# corrupt pixels after output resize. Keep GLES2 and DMA-BUF acceleration, but
+# use implicit/linear formats unless explicitly opted in.
+export WLR_EGL_NO_MODIFIERS="${WLR_EGL_NO_MODIFIERS:-1}"
 
 # Rack uses a pinned local Sway build. The explicit override is used by the
 # isolated launcher tests; normal sessions verify the source and build stamp

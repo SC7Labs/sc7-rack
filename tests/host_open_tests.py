@@ -61,6 +61,7 @@ import sys
 keys = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK", "I3SOCK", "PATH",
         "LD_LIBRARY_PATH", "WLR_BACKENDS", "WLR_LIBINPUT_NO_DEVICES",
+        "WLR_EGL_NO_MODIFIERS",
         "WAYLAND_SOCKET", "XDG_ACTIVATION_TOKEN")
 record = {"pid": os.getpid(), "argv": sys.argv[1:],
           "env": {key: os.environ[key] for key in keys if key in os.environ}}
@@ -77,7 +78,8 @@ import shutil
 keep = {"HOME", "XDG_BIN_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
         "WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK",
         "I3SOCK", "PATH", "LD_LIBRARY_PATH", "WLR_BACKENDS",
-        "WLR_LIBINPUT_NO_DEVICES", "SC7_RACK_PRIVATE_BIN",
+        "WLR_LIBINPUT_NO_DEVICES", "WLR_EGL_NO_MODIFIERS",
+        "SC7_RACK_PRIVATE_BIN",
         "SC7_TEST_SWAY_CAPTURE", "SC7_TEST_INNER_CAPTURE",
         "SC7_TEST_OPEN_CAPTURE"}
 record = {"env": {key: value for key, value in os.environ.items()
@@ -145,6 +147,7 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
         for key in tuple(cls.host_env):
             if key.startswith("SC7_HOST_") or key.startswith("SC7_RACK_"):
                 del cls.host_env[key]
+        cls.host_env.pop("WLR_EGL_NO_MODIFIERS", None)
         cls.host_env.update(
             HOME=str(cls.home),
             XDG_BIN_HOME=str(cls.host_bin),
@@ -285,6 +288,8 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
                 self.assertEqual(self.sway_env.get(key), value)
         self.assertEqual(self.sway_record["resolved_open"], str(SHIM))
         self.assertEqual(self.host_env["PATH"], self.host_path)
+        self.assertEqual(self.sway_env["WLR_EGL_NO_MODIFIERS"], "1")
+        self.assertEqual(self.sway_env["SC7_HOST_WLR_EGL_NO_MODIFIERS_SET"], "")
 
     def test_inner_session_keeps_private_opener_first(self):
         self.assertEqual(self.installed_inner.read_bytes(), INNER.read_bytes())
@@ -328,6 +333,7 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
                     self.assertEqual(record["env"].get(key), value)
             self.assertNotIn("WAYLAND_SOCKET", record["env"])
             self.assertNotIn("XDG_ACTIVATION_TOKEN", record["env"])
+            self.assertNotIn("WLR_EGL_NO_MODIFIERS", record["env"])
         self.assertEqual(mime_file.read_bytes(), mime_before)
         self.assertEqual(
             sorted(self.home.rglob("mimeapps.list")) + sorted(self.config.rglob("mimeapps.list")),
@@ -336,15 +342,26 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
 
     def test_unset_host_values_do_not_leak_nested_values(self):
         env = self.nested_env.copy()
-        for key in ("DISPLAY", "SWAYSOCK", "I3SOCK", "LD_LIBRARY_PATH"):
+        for key in ("DISPLAY", "SWAYSOCK", "I3SOCK", "LD_LIBRARY_PATH",
+                    "WLR_EGL_NO_MODIFIERS"):
             env[f"SC7_HOST_{key}"] = ""
             env[f"SC7_HOST_{key}_SET"] = ""
         result = self.invoke(["https://example.test/no-host-display"], env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         child_env = self.wait_for_records(1)[0]["env"]
-        for key in ("DISPLAY", "SWAYSOCK", "I3SOCK", "LD_LIBRARY_PATH"):
+        for key in ("DISPLAY", "SWAYSOCK", "I3SOCK", "LD_LIBRARY_PATH",
+                    "WLR_EGL_NO_MODIFIERS"):
             with self.subTest(variable=key):
                 self.assertNotIn(key, child_env)
+
+    def test_host_modifier_preference_is_restored_for_opened_apps(self):
+        env = self.nested_env.copy()
+        env["SC7_HOST_WLR_EGL_NO_MODIFIERS"] = "0"
+        env["SC7_HOST_WLR_EGL_NO_MODIFIERS_SET"] = "x"
+        result = self.invoke(["https://example.test/host-modifiers"], env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        child_env = self.wait_for_records(1)[0]["env"]
+        self.assertEqual(child_env["WLR_EGL_NO_MODIFIERS"], "0")
 
     def test_recursive_opener_is_rejected(self):
         env = self.nested_env.copy()
@@ -404,6 +421,8 @@ with open(os.environ["SC7_TEST_MIME_CAPTURE"], "w", encoding="utf-8") as output:
         self.assertEqual(files["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
         self.assertEqual(mime["env"]["WAYLAND_DISPLAY"], self.host_env["WAYLAND_DISPLAY"])
         self.assertNotIn("WAYLAND_SOCKET", mime["env"])
+        self.assertNotIn("WLR_EGL_NO_MODIFIERS", files["env"])
+        self.assertNotIn("WLR_EGL_NO_MODIFIERS", mime["env"])
 
         for name in (
             "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "SWAYSOCK",

@@ -196,6 +196,37 @@ class RuntimeLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((Path(self.env["XDG_RUNTIME_DIR"]) / "sc7-rack/sc7-rack.pid").exists())
 
+    def test_nested_gles2_disables_explicit_modifiers_with_opt_in_override(self):
+        sway = self.work / "sway-capture-renderer"
+        sway.write_text(
+            "#!/usr/bin/python3\n"
+            "import json, os\n"
+            "with open(os.environ['SC7_TEST_CAPTURE'], 'w') as out:\n"
+            "    json.dump({name: os.environ.get(name) for name in "
+            "('WLR_RENDERER', 'WLR_EGL_NO_MODIFIERS', 'WLR_BACKENDS')}, out)\n"
+        )
+        sway.chmod(0o755)
+        capture = self.work / "renderer.json"
+        for explicit, expected in ((None, "1"), ("0", "0")):
+            env = self.env | {
+                "SC7_RACK_SWAY_BINARY": str(sway),
+                "SC7_TEST_CAPTURE": str(capture),
+                "WLR_RENDERER": "gles2",
+            }
+            env.pop("WLR_EGL_NO_MODIFIERS", None)
+            if explicit is not None:
+                env["WLR_EGL_NO_MODIFIERS"] = explicit
+            result = subprocess.run(
+                ["bash", str(ROOT / "bin/sc7-rack")],
+                env=env, capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(capture.read_text()), {
+                "WLR_RENDERER": "gles2",
+                "WLR_EGL_NO_MODIFIERS": expected,
+                "WLR_BACKENDS": "wayland",
+            })
+
 
 if __name__ == "__main__":
     unittest.main()

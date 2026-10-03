@@ -145,6 +145,14 @@ sc7-rack
 rack
 ```
 
+Rack keeps the accelerated GLES2 renderer while disabling explicit EGL DMA-BUF
+modifiers inside its nested compositor. This avoids the System Monitor pixel
+corruption observed during resizing on physical COSMIC hardware. It does not
+change the host desktop or force Pixman. To test explicit modifiers again, close
+Rack and launch it with `WLR_EGL_NO_MODIFIERS=0 sc7-rack`.
+The physical A/B result and optional visual resize test are recorded in
+[`docs/RENDERER_COMPATIBILITY.md`](docs/RENDERER_COMPATIBILITY.md).
+
 ### Exiting
 Press **`Super+Shift+Q`** to close the entire rack window and terminate all nested processes cleanly.
 
