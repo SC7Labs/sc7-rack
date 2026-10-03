@@ -3,8 +3,10 @@
 #include <dlfcn.h>
 #include <inttypes.h>
 #include <pixman.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <wlr/render/swapchain.h>
@@ -15,14 +17,23 @@
 
 static FILE *trace_file(void) {
     static FILE *file;
-    if (!file) {
+    static bool stopped;
+    if (!file && !stopped) {
         const char *path = getenv("SC7_RENDER_TRACE");
         if (path && *path) {
             file = fopen(path, "a");
             if (file) {
                 setvbuf(file, NULL, _IOLBF, 0);
+            } else {
+                stopped = true;
             }
         }
+    }
+    if (file && ftello(file) >= (off_t)(32 * 1024 * 1024)) {
+        fputs("trace-truncated limit=33554432\n", file);
+        fclose(file);
+        file = NULL;
+        stopped = true;
     }
     return file;
 }

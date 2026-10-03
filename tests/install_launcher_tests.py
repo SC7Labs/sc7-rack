@@ -227,6 +227,42 @@ class RuntimeLauncherTests(unittest.TestCase):
                 "WLR_BACKENDS": "wayland",
             })
 
+    def test_full_repaint_diagnostic_uses_sway_builtin_flag_only_when_requested(self):
+        sway = self.work / "sway-capture-args"
+        sway.write_text(
+            "#!/usr/bin/python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['SC7_TEST_CAPTURE'], 'w') as out:\n"
+            "    json.dump(sys.argv[1:], out)\n"
+        )
+        sway.chmod(0o755)
+        capture = self.work / "sway-args.json"
+        base = self.env | {
+            "SC7_RACK_SWAY_BINARY": str(sway),
+            "SC7_TEST_CAPTURE": str(capture),
+        }
+        for flag, expected_prefix in ((None, []), ("1", ["-D", "damage=rerender"])):
+            env = dict(base)
+            if flag is not None:
+                env["SC7_RACK_FULL_REPAINT"] = flag
+            else:
+                env.pop("SC7_RACK_FULL_REPAINT", None)
+            result = subprocess.run(
+                ["bash", str(ROOT / "bin/sc7-rack")],
+                env=env, capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(capture.read_text())[:len(expected_prefix)], expected_prefix)
+
+        capture.unlink()
+        result = subprocess.run(
+            ["bash", str(ROOT / "bin/sc7-rack")],
+            env=base | {"SC7_RACK_FULL_REPAINT": "invalid"},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(capture.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

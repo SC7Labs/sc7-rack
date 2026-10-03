@@ -313,7 +313,25 @@ def summarize_trace(path: Path) -> dict:
                                          "\n".join(lines))))
     modifiers = sorted(set(re.findall(r" acquire .* modifier=(0x[0-9a-f]+)",
                                       "\n".join(lines))))
+    frame_commits = sum(" commit " in line and "buffer=0x" in line
+                        and "ok=1" in line for line in lines)
+    full_commits = partial_commits = 0
+    for line in lines:
+        if " commit " not in line or "buffer=0x" not in line or "ok=1" not in line:
+            continue
+        match = re.search(
+            r"size=(\d+)x(\d+).*damage_rects=(\d+) box=(-?\d+),(-?\d+),(-?\d+),(-?\d+)",
+            line,
+        )
+        if not match:
+            continue
+        width, height, rects, x1, y1, x2, y2 = map(int, match.groups())
+        if rects == 1 and x1 <= 0 and y1 <= 0 and x2 >= width and y2 >= height:
+            full_commits += 1
+        else:
+            partial_commits += 1
     return {"acquires": len(ages), "buffer_ages": sorted(set(ages)),
+            "trace_truncated": any("trace-truncated" in line for line in lines),
             "buffer_identities": len(buffers), "sizes": sizes,
             "buffer_kinds": buffer_kinds, "modifiers": modifiers,
             "damage_queries": sum(" damage " in line for line in lines),
@@ -321,8 +339,9 @@ def summarize_trace(path: Path) -> dict:
                                           for line in lines),
             "output_commits": sum(" commit " in line and "ok=1" in line
                                   for line in lines),
-            "frame_commits": sum(" commit " in line and "buffer=0x" in line
-                                 and "ok=1" in line for line in lines),
+            "frame_commits": frame_commits,
+            "full_frame_damage_commits": full_commits,
+            "partial_frame_damage_commits": partial_commits,
             "submissions": sum(" submit " in line for line in lines)}
 
 
@@ -362,6 +381,9 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
     inner_log = out / "inner.log"
     monitor_log = out / "monitor.log"
     trace = out / "render-trace.log"
+    trace.write_text("")
+    for stale in (out / "report.json", out / "failure.json"):
+        stale.unlink(missing_ok=True)
     host = nested = inner_process = None
     logs = []
     frames = []
@@ -387,7 +409,11 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
             nested_env["WLR_EGL_NO_MODIFIERS"] = "1"
         before = sockets(runtime)
         logs.append(nested_log.open("w"))
-        nested = subprocess.Popen([str(LOCAL_SWAY), "-d", "-c", str(nested_config)],
+        sway_args = [str(LOCAL_SWAY), "-d"]
+        if args.full_repaint:
+            sway_args += ["-D", "damage=rerender"]
+        sway_args += ["-c", str(nested_config)]
+        nested = subprocess.Popen(sway_args,
                                   env=nested_env, stdout=logs[-1],
                                   stderr=subprocess.STDOUT, start_new_session=True)
         nested_socket = wait_socket(runtime, before, nested, nested_log)
@@ -477,8 +503,14 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
                 telemetry["renderer_path"] != expected_renderer or
                 not telemetry["damage_queries"] or
                 not telemetry["frame_commits"] or
-                telemetry["import_failures"]):
+                telemetry["import_failures"] or telemetry["trace_truncated"]):
             raise AssertionError(f"missing {expected_kind} buffer or damage telemetry: "
+                                 f"{telemetry}")
+        if (telemetry["full_frame_damage_commits"] +
+                telemetry["partial_frame_damage_commits"] != telemetry["frame_commits"]):
+            raise AssertionError(f"incomplete output damage trace: {telemetry}")
+        if args.full_repaint and telemetry["partial_frame_damage_commits"]:
+            raise AssertionError("Sway full-repaint diagnostic left partial output damage: "
                                  f"{telemetry}")
         if renderer == "gles2-no-modifiers" and any(
                 value not in ("0x0000000000000000", "0xffffffffffffffff")
@@ -487,6 +519,7 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
                                  f"{telemetry['modifiers']}")
         result = {
             "renderer": renderer, "host_renderer": args.host_renderer,
+            "full_repaint": args.full_repaint,
             "frames": frames, "trace": telemetry,
         }
         (out / "report.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -515,6 +548,8 @@ def main() -> None:
                         help="Sway binary for the private host compositor")
     parser.add_argument("--cycles", type=int, default=12)
     parser.add_argument("--settle", type=float, default=0.35)
+    parser.add_argument("--full-repaint", action="store_true",
+                        help="use Sway's full-output rerender diagnostic")
     parser.add_argument("--grim", type=Path,
                         default=Path(shutil.which("grim") or "/nonexistent/grim"))
     parser.add_argument("--artifacts", type=Path,
