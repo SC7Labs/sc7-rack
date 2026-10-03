@@ -83,8 +83,19 @@ elif name == "apt-get":
                 continue
             if package == "python3-tk":
                 (root / "tk-installed").touch()
+            if package == "cosmic-monitor":
+                (root / "monitor-version").write_text(
+                    os.environ.get("SC7_TEST_MONITOR_CANDIDATE", "1.9.0")
+                )
             for command in package_commands.get(package, ()):
                 make_command(command)
+elif name == "cosmic-monitor":
+    if args == ["--version"]:
+        version = root / "monitor-version"
+        if version.is_file():
+            print("cosmic-monitor " + version.read_text())
+        else:
+            sys.exit(1)
 elif name == "make":
     if os.environ.get("SC7_TEST_BUILD_FAIL") == "bridge":
         sys.exit(43)
@@ -122,7 +133,8 @@ class FreshInstallTests(unittest.TestCase):
         self.root = self.base / "Rack clone with spaces"
         self.home = self.base / "new user home"
         self.fake_bin = self.base / "system bin"
-        for directory in (self.root, self.home, self.fake_bin):
+        self.xdg_bin = self.base / "xdg bin"
+        for directory in (self.root, self.home, self.fake_bin, self.xdg_bin):
             directory.mkdir()
         for directory in ("config", "settings", "desktop", "assets/icons"):
             shutil.copytree(ROOT / directory, self.root / directory)
@@ -144,7 +156,7 @@ class FreshInstallTests(unittest.TestCase):
         # directories are on PATH. Only the listed basic OS tools are exposed.
         for name in (
             "bash", "dirname", "mkdir", "cp", "chmod", "ln", "grep",
-            "readlink", "cat", "sort", "sed", "awk", "realpath",
+            "readlink", "cat", "sort", "sed", "awk", "realpath", "dpkg",
         ):
             source = shutil.which(name)
             self.assertIsNotNone(source, f"Required test tool: {name}")
@@ -154,6 +166,10 @@ class FreshInstallTests(unittest.TestCase):
             "cosmic-term", "cosmic-files",
         ):
             executable(self.fake_bin / name, FAKE_COMMAND)
+        # The command is initially uninstalled (its package version is
+        # unknown), but exists as a test shim in Rack's first PATH directory.
+        # This keeps the real host /usr/bin/cosmic-monitor out of the fixture.
+        executable(self.xdg_bin / "cosmic-monitor", FAKE_COMMAND)
         self.environment = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("XDG_", "SC7_"))
@@ -164,6 +180,7 @@ class FreshInstallTests(unittest.TestCase):
             "USER": "fresh-rack-user",
             "LOGNAME": "fresh-rack-user",
             "PATH": str(self.fake_bin),
+            "XDG_BIN_HOME": str(self.xdg_bin),
             "XDG_CURRENT_DESKTOP": "COSMIC",
             "XDG_SESSION_TYPE": "wayland",
             "SC7_TEST_ROOT": str(self.root),
@@ -218,7 +235,7 @@ class FreshInstallTests(unittest.TestCase):
         self.assert_succeeded(self.install())
         self.assertEqual(settings.read_text(), chosen_settings)
         self.assertEqual(self.commands("apt-get"), package_calls, "Rerun should reuse available packages")
-        for directory in (self.home / ".local/bin", self.home / "bin"):
+        for directory in (self.xdg_bin, self.home / "bin"):
             for name in ("sc7-rack", "sc7-rack-settings", "sc7-rack-files", "sc7-rack-open-host", "sc7-clipboard-bridge"):
                 self.assertEqual((directory / name).resolve(), self.root / "bin" / name)
             self.assertEqual((directory / "rack").resolve(), self.root / "bin/sc7-rack")
@@ -260,9 +277,43 @@ class FreshInstallTests(unittest.TestCase):
         self.assert_failed_before_configuration(self.install(SC7_TEST_APT_FAIL="install"))
         self.assertEqual(self.commands("bootstrap-wlroots.sh"), [])
 
-    def test_missing_command_after_apt_success_is_rejected(self) -> None:
+    def test_missing_monitor_package_after_apt_success_is_rejected(self) -> None:
         self.assert_failed_before_configuration(self.install(SC7_TEST_APT_OMIT="cosmic-monitor"))
         self.assertEqual(self.commands("bootstrap-wlroots.sh"), [])
+
+    def test_old_monitor_is_upgraded_to_main_rig_dashboard_version(self) -> None:
+        (self.root / "monitor-version").write_text("1.5.0")
+        self.assert_succeeded(self.install())
+        self.assertEqual((self.root / "monitor-version").read_text(), "1.9.0")
+        self.assertTrue(any("cosmic-monitor" in call for call in self.commands("apt-get")
+                            if "install" in call))
+
+    def test_unavailable_monitor_upgrade_stops_before_configuration(self) -> None:
+        (self.root / "monitor-version").write_text("1.5.0")
+        result = self.install(SC7_TEST_MONITOR_CANDIDATE="1.5.0")
+        self.assert_failed_before_configuration(result)
+        self.assertIn("requires 1.9.0 or newer", result.stderr)
+        self.assertEqual(self.commands("bootstrap-wlroots.sh"), [])
+
+    def test_current_monitor_does_not_trigger_package_upgrade(self) -> None:
+        (self.root / "monitor-version").write_text("1.9.0")
+        self.assert_succeeded(self.install())
+        self.assertFalse(any("cosmic-monitor" in call for call in self.commands("apt-get")
+                             if "install" in call))
+
+    def test_old_shadowing_monitor_binary_is_rejected(self) -> None:
+        # The caller sees a current version, but Rack's preferred directory
+        # has an old user binary that a package upgrade cannot replace.
+        (self.xdg_bin / "cosmic-monitor").write_text(
+            "#!/bin/sh\necho 'cosmic-monitor 1.5.0'\n"
+        )
+        executable(self.fake_bin / "cosmic-monitor", FAKE_COMMAND)
+        (self.root / "monitor-version").write_text("1.9.0")
+        result = self.install()
+        self.assert_failed_before_configuration(result)
+        self.assertIn("requires 1.9.0 or newer", result.stderr)
+        self.assertTrue(any("cosmic-monitor" in call for call in self.commands("apt-get")
+                            if "install" in call))
 
     def test_missing_tk_after_apt_success_is_rejected(self) -> None:
         self.assert_failed_before_configuration(self.install(SC7_TEST_APT_OMIT="python3-tk"))
@@ -270,6 +321,7 @@ class FreshInstallTests(unittest.TestCase):
         self.assertEqual(self.commands("bootstrap-wlroots.sh"), [])
 
     def test_missing_cosmic_app_outside_cosmic_does_not_install_a_desktop(self) -> None:
+        (self.fake_bin / "cosmic-term").unlink()
         self.assert_failed_before_configuration(self.install(XDG_CURRENT_DESKTOP="GNOME"))
         self.assertEqual(self.commands("apt-get"), [])
         self.assertEqual(self.commands("bootstrap-wlroots.sh"), [])

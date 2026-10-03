@@ -35,6 +35,28 @@ declare -A APT_PACKAGES=(
 )
 MANDATORY_CMDS=(sway swaymsg cosmic-term cosmic-files cosmic-monitor htop python3 xdg-open fuser pgrep)
 APT_INSTALLABLE=()
+COSMIC_MONITOR_MIN_VERSION=1.9.0
+# Rack prepends these directories before launching its inner applications.
+# Inspect that same executable, even if the installer's caller has a
+# different PATH order.
+RACK_APP_PATH="$XDG_BIN_HOME:$HOME/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+rack_monitor_binary() {
+    PATH="$RACK_APP_PATH" command -v cosmic-monitor
+}
+required_command_available() {
+    if [[ "$1" == cosmic-monitor ]]; then
+        rack_monitor_binary >/dev/null 2>&1
+    else
+        command -v "$1" >/dev/null 2>&1
+    fi
+}
+cosmic_monitor_version() {
+    local binary output
+    binary="$(rack_monitor_binary)" || return 1
+    output="$("$binary" --version 2>/dev/null)" || return 1
+    [[ "$output" =~ ^cosmic-monitor[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$) ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
 COSMIC_PRESENT=false
 rack_desktop="${XDG_CURRENT_DESKTOP:-}"
 if [[ "${rack_desktop^^}" == *COSMIC* ]] ||
@@ -42,8 +64,19 @@ if [[ "${rack_desktop^^}" == *COSMIC* ]] ||
     COSMIC_PRESENT=true
 fi
 for cmd in "${MANDATORY_CMDS[@]}"; do
-    if command -v "$cmd" >/dev/null 2>&1; then
-        echo "  ✓ $cmd"
+    if required_command_available "$cmd"; then
+        if [[ "$cmd" == cosmic-monitor ]]; then
+            monitor_version="$(cosmic_monitor_version || true)"
+            if [[ -n "$monitor_version" ]] &&
+                    dpkg --compare-versions "$monitor_version" ge "$COSMIC_MONITOR_MIN_VERSION"; then
+                echo "  ✓ cosmic-monitor $monitor_version"
+            else
+                echo "  ↻ cosmic-monitor ${monitor_version:-unknown} needs $COSMIC_MONITOR_MIN_VERSION or newer"
+                APT_INSTALLABLE+=(cosmic-monitor)
+            fi
+        else
+            echo "  ✓ $cmd"
+        fi
     else
         case "$cmd" in
             cosmic-term|cosmic-files|cosmic-monitor)
@@ -65,11 +98,18 @@ if (( ${#APT_INSTALLABLE[@]} > 0 )); then
     }
 fi
 for cmd in "${MANDATORY_CMDS[@]}"; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
+    if ! required_command_available "$cmd"; then
         echo "ERROR: Required command '$cmd' is still missing after package installation." >&2
         exit 1
     fi
 done
+monitor_version="$(cosmic_monitor_version || true)"
+if [[ -z "$monitor_version" ]] ||
+        ! dpkg --compare-versions "$monitor_version" ge "$COSMIC_MONITOR_MIN_VERSION"; then
+    echo "ERROR: COSMIC System Monitor ${monitor_version:-unknown} is installed, but Rack requires $COSMIC_MONITOR_MIN_VERSION or newer for its Dashboard cards." >&2
+    echo "Check the Pop!_OS package candidate and rerun ./install.sh after it is available." >&2
+    exit 1
+fi
 echo "All runtime dependencies satisfied."
 
 # ─── Phase 1b: Install the graphical Settings dependency ────────────────────
@@ -258,7 +298,11 @@ VALIDATION_FAILED=false
 export PATH="$XDG_BIN_HOME:$HOME/bin:$PATH"
 
 for cmd in "${VALIDATION_CMDS[@]}"; do
-    resolved="$(command -v "$cmd" 2>/dev/null || true)"
+    if [[ "$cmd" == cosmic-monitor ]]; then
+        resolved="$(rack_monitor_binary 2>/dev/null || true)"
+    else
+        resolved="$(command -v "$cmd" 2>/dev/null || true)"
+    fi
     if [[ -n "$resolved" ]]; then
         echo "  ✓ $cmd → $resolved"
     else

@@ -108,7 +108,7 @@ are missing. No Git name, email, signing key, or manual development-package setu
 is required. Keep the clone in place: the installed launchers use its local builds.
 
 This will:
-1. Install missing runtime tools, COSMIC application packages when the desktop is present, and the Python Tkinter dependency for graphical Settings.
+1. Install missing runtime tools, COSMIC application packages when the desktop is present, and the Python Tkinter dependency for graphical Settings. If COSMIC System Monitor is older than 1.9.0, upgrade it from the configured Pop!_OS packages so the Dashboard shows its CPU, Memory, and Disk cards first.
 2. Install missing build requirements, including C headers and EGL/GLES2/GBM development packages, and verify them before compiling. Build patched wlroots locally for SC7Labs DnD and compositor lifecycle, then build a pinned local Sway with the popup lifecycle fix. System wlroots and `/usr/bin/sway` are **never replaced**. Rerunning `./install.sh` resumes verified partial builds.
 3. Rebuild `sc7-clipboard-bridge` from source for the current machine.
 4. Link binaries to `~/.local/bin` and `~/bin` (`sc7-rack`, `sc7-rack-settings`, `sc7-clipboard-bridge`).
@@ -129,6 +129,10 @@ After installation, verify the local compositor with:
 
 To update or retry an interrupted installation, run `./install.sh` again.
 Existing user settings are preserved.
+The installer checks the actual `cosmic-monitor` executable after the package
+step and stops with an explanation if version 1.9.0 or newer is unavailable.
+See [Monitor version parity](docs/MONITOR_VERSION_PARITY.md) for the laptop2
+retest.
 
 > **Note:** SC7Labs Rack targets the **COSMIC Desktop Environment on Wayland** (System76 COSMIC).
 > Generic Ubuntu/Wayland support is not guaranteed.
