@@ -35,6 +35,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WLROOTS_DIR="$REPO_ROOT/vendor/wlroots"
 BUILD_DIR="$WLROOTS_DIR/build"
 PATCH_FILE="$REPO_ROOT/patches/wlroots-sc7labs-rack.patch"
+INPUT_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_INPUT_PATCH_ID"
+CURSOR_MIGRATION_PATCH_FILE="$REPO_ROOT/patches/wlroots-cursor-serial-fix.patch"
 PREVIOUS_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_PREVIOUS_PATCH_ID"
 POINTER_MIGRATION_PATCH_FILE="$REPO_ROOT/patches/wlroots-pointer-release-fix.patch"
 LEGACY_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_LEGACY_PATCH_ID"
@@ -108,6 +110,7 @@ verify_patched_source() {
     SOURCE_PATCH_ID="$actual_patch_id"
     [[ -n "$SOURCE_PATCH_ID" &&
        ( "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ||
+         "$SOURCE_PATCH_ID" == "$INPUT_PATCH_ID" ||
          "$SOURCE_PATCH_ID" == "$PREVIOUS_PATCH_ID" ||
          "$SOURCE_PATCH_ID" == "$LEGACY_PATCH_ID" ) ]] \
         || die "wlroots changes do not match a supported SC7Labs patch"
@@ -124,6 +127,55 @@ apply_authenticated_migration() {
             || die "Upgrade mismatch and rollback of staged wlroots changes failed"
         return 1
     fi
+}
+
+upgrade_authenticated_source() {
+    local source_id="$1" label="" index rollback_index
+    local -a migration_files=() target_ids=() failure_messages=() applied=()
+
+    # Each migration is applied to the index only after its resulting complete
+    # source matches the next authenticated patch generation. If a later stage
+    # fails, reverse all earlier stages before reporting the error.
+    if [[ "$source_id" == "$LEGACY_PATCH_ID" ]]; then
+        label="legacy SC7Labs DnD patch"
+        migration_files+=("$DND_MIGRATION_PATCH_FILE")
+        target_ids+=("$PREVIOUS_PATCH_ID")
+        failure_messages+=("DnD lifetime fix does not produce the authenticated previous source")
+    fi
+    if [[ "$source_id" == "$LEGACY_PATCH_ID" ||
+          "$source_id" == "$PREVIOUS_PATCH_ID" ]]; then
+        [[ -n "$label" ]] || label="previous SC7Labs patch"
+        migration_files+=("$POINTER_MIGRATION_PATCH_FILE")
+        target_ids+=("$INPUT_PATCH_ID")
+        failure_messages+=("Pointer release fix does not produce the authenticated input source")
+    fi
+    if [[ "$source_id" == "$LEGACY_PATCH_ID" ||
+          "$source_id" == "$PREVIOUS_PATCH_ID" ||
+          "$source_id" == "$INPUT_PATCH_ID" ]]; then
+        [[ -n "$label" ]] || label="input-patched SC7Labs source"
+        migration_files+=("$CURSOR_MIGRATION_PATCH_FILE")
+        target_ids+=("$EXPECTED_PATCH_ID")
+        failure_messages+=("Cursor serial fix does not produce the current SC7Labs patch")
+    fi
+
+    info "Upgrading the authentic $label in place..."
+    for ((index = 0; index < ${#migration_files[@]}; index++)); do
+        if ! apply_authenticated_migration "${migration_files[index]}" "${target_ids[index]}"; then
+            for ((rollback_index = ${#applied[@]} - 1; rollback_index >= 0; rollback_index--)); do
+                git -C "$WLROOTS_DIR" apply --reverse --index "${applied[rollback_index]}" \
+                    || die "Upgrade failed and rollback of staged wlroots changes failed"
+            done
+            die "${failure_messages[index]}"
+        fi
+        applied+=("${migration_files[index]}")
+    done
+
+    commit_rack_patch "fix(wlroots): preserve cursor serial across DnD exits" \
+        || die "Committing wlroots cursor fix failed"
+    verify_patched_source
+    [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
+        || die "Upgraded wlroots source does not match the current SC7Labs patch"
+    info "Authenticated wlroots source upgraded without recloning."
 }
 
 verify_library_features() {
@@ -150,6 +202,8 @@ verify_library_features() {
 
 [[ -f "$BASE_REV_FILE" ]] || die "Missing: $BASE_REV_FILE"
 [[ -f "$PATCH_FILE" ]]    || die "Missing: $PATCH_FILE"
+[[ -f "$INPUT_PATCH_ID_FILE" ]] || die "Missing: $INPUT_PATCH_ID_FILE"
+[[ -f "$CURSOR_MIGRATION_PATCH_FILE" ]] || die "Missing: $CURSOR_MIGRATION_PATCH_FILE"
 [[ -f "$PREVIOUS_PATCH_ID_FILE" ]] || die "Missing: $PREVIOUS_PATCH_ID_FILE"
 [[ -f "$POINTER_MIGRATION_PATCH_FILE" ]] || die "Missing: $POINTER_MIGRATION_PATCH_FILE"
 [[ -f "$LEGACY_PATCH_ID_FILE" ]] || die "Missing: $LEGACY_PATCH_ID_FILE"
@@ -174,12 +228,17 @@ PINNED_SHA="$(tr -d '[:space:]' < "$BASE_REV_FILE")"
 info "Pinned wlroots base revision: $PINNED_SHA"
 EXPECTED_PATCH_ID="$(git patch-id --stable < "$PATCH_FILE" | awk '{print $1}')"
 [[ -n "$EXPECTED_PATCH_ID" ]] || die "Could not identify the tracked wlroots patch"
+INPUT_PATCH_ID="$(tr -d '[:space:]' < "$INPUT_PATCH_ID_FILE")"
+[[ "$INPUT_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Input-patched wlroots patch ID is invalid"
 PREVIOUS_PATCH_ID="$(tr -d '[:space:]' < "$PREVIOUS_PATCH_ID_FILE")"
 [[ "$PREVIOUS_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Previous wlroots patch ID is invalid"
 LEGACY_PATCH_ID="$(tr -d '[:space:]' < "$LEGACY_PATCH_ID_FILE")"
 [[ "$LEGACY_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Legacy wlroots patch ID is invalid"
-[[ "$EXPECTED_PATCH_ID" != "$PREVIOUS_PATCH_ID" &&
+[[ "$EXPECTED_PATCH_ID" != "$INPUT_PATCH_ID" &&
+   "$EXPECTED_PATCH_ID" != "$PREVIOUS_PATCH_ID" &&
    "$EXPECTED_PATCH_ID" != "$LEGACY_PATCH_ID" &&
+   "$INPUT_PATCH_ID" != "$PREVIOUS_PATCH_ID" &&
+   "$INPUT_PATCH_ID" != "$LEGACY_PATCH_ID" &&
    "$PREVIOUS_PATCH_ID" != "$LEGACY_PATCH_ID" ]] \
     || die "wlroots patch generations are not distinct"
 
@@ -250,31 +309,8 @@ info "Current wlroots HEAD:   $CURRENT_HEAD (branch: $CURRENT_BRANCH)"
 
 if [[ "$CURRENT_HEAD" != "$PINNED_SHA" ]]; then
     verify_patched_source
-    if [[ "$SOURCE_PATCH_ID" == "$LEGACY_PATCH_ID" ]]; then
-        info "Upgrading the authentic legacy SC7Labs DnD patch in place..."
-        apply_authenticated_migration "$DND_MIGRATION_PATCH_FILE" "$PREVIOUS_PATCH_ID" \
-            || die "Legacy DnD lifetime patch does not produce the authenticated previous source"
-        if ! apply_authenticated_migration "$POINTER_MIGRATION_PATCH_FILE" "$EXPECTED_PATCH_ID"; then
-            git -C "$WLROOTS_DIR" apply --reverse --index "$DND_MIGRATION_PATCH_FILE" \
-                || die "Pointer upgrade failed and rollback of staged DnD fix failed"
-            die "Pointer release fix does not produce the current SC7Labs patch"
-        fi
-        commit_rack_patch "fix(wlroots): release DnD and popup pointer state" \
-            || die "Committing wlroots fixes failed"
-        verify_patched_source
-        [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
-            || die "Upgraded wlroots source does not match the current SC7Labs patch"
-        info "Legacy DnD patch upgraded without recloning or reapplying the base patch."
-    elif [[ "$SOURCE_PATCH_ID" == "$PREVIOUS_PATCH_ID" ]]; then
-        info "Upgrading the authentic previous SC7Labs patch in place..."
-        apply_authenticated_migration "$POINTER_MIGRATION_PATCH_FILE" "$EXPECTED_PATCH_ID" \
-            || die "Pointer release fix does not produce the current SC7Labs patch"
-        commit_rack_patch "fix(wlroots): release popup pointer state" \
-            || die "Committing pointer release fix failed"
-        verify_patched_source
-        [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
-            || die "Upgraded wlroots source does not match the current SC7Labs patch"
-        info "Previous wlroots patch upgraded without recloning."
+    if [[ "$SOURCE_PATCH_ID" != "$EXPECTED_PATCH_ID" ]]; then
+        upgrade_authenticated_source "$SOURCE_PATCH_ID"
     else
         info "Authentic SC7Labs patch already committed — continuing to build."
     fi

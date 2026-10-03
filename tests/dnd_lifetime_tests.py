@@ -21,6 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 VENDOR = REPO / "vendor" / "wlroots"
 INCREMENTAL = REPO / "patches" / "wlroots-dnd-lifetime-fix.patch"
 POINTER_FIX = REPO / "patches" / "wlroots-pointer-release-fix.patch"
+CURSOR_FIX = REPO / "patches" / "wlroots-cursor-serial-fix.patch"
 FULL = REPO / "patches" / "wlroots-sc7labs-rack.patch"
 BASE = (REPO / "patches" / "WLROOTS_BASE_REVISION").read_text().strip()
 
@@ -41,9 +42,9 @@ def prepared_legacy_source(root: Path) -> Path:
         shutil.copy2(VENDOR / name, target)
     environment = os.environ.copy()
     environment["GIT_CEILING_DIRECTORIES"] = str(REPO)
-    # The old DnD patch predates the pointer fix. Reverse both migrations in
-    # order on disposable copies, without changing the installed checkout.
-    for patch in (POINTER_FIX, INCREMENTAL):
+    # The old DnD patch predates the pointer and cursor fixes. Reverse the
+    # migrations in order on disposable copies, without changing the checkout.
+    for patch in (CURSOR_FIX, POINTER_FIX, INCREMENTAL):
         subprocess.run([
             "git", "apply", "-R",
             "--include=backend/wayland/dnd.c",

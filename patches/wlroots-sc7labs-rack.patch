@@ -83,10 +83,10 @@ index 9f78b6f..59ffeaa 100644
  		wl->remote_display = remote_display;
 diff --git a/backend/wayland/dnd.c b/backend/wayland/dnd.c
 new file mode 100644
-index 0000000..2cba7f8
+index 0000000..2f96c4b
 --- /dev/null
 +++ b/backend/wayland/dnd.c
-@@ -0,0 +1,1155 @@
+@@ -0,0 +1,1157 @@
 +#define _POSIX_C_SOURCE 200809L
 +#define _GNU_SOURCE
 +
@@ -987,7 +987,9 @@ index 0000000..2cba7f8
 +			wl_list_for_each(pointer, &seat->pointers, link) {
 +				if (pointer->output == output) {
 +					seat->active_pointer = pointer;
-+					output->cursor.pointer = pointer;
++					// Data-device enter carries a drag serial, not a
++					// wl_pointer.enter serial. Keep cursor ownership unset
++					// until a real pointer enter permits set_cursor.
 +					break;
 +				}
 +			}

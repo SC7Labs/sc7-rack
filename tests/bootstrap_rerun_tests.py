@@ -47,8 +47,8 @@ class BootstrapRerunTests(unittest.TestCase):
         self.base_sha = self.git("rev-parse", "HEAD").stdout.strip()
         self.git("checkout", "-qb", "working-dnd-transport")
 
-        # Model three authenticated source generations. The two incremental
-        # patches lead from legacy -> previous -> current.
+        # Model four authenticated source generations. The incremental patches
+        # lead from legacy -> previous -> input -> current.
         source = self.wlroots / "backend.txt"
         source.write_text("SC7 legacy transport\n", encoding="utf-8")
         legacy_patch = self.git("diff", "--", "backend.txt").stdout
@@ -74,7 +74,20 @@ class BootstrapRerunTests(unittest.TestCase):
         (self.patches / "WLROOTS_PREVIOUS_PATCH_ID").write_text(
             previous_id + "\n", encoding="utf-8"
         )
-        self.current_text = "SC7 patched transport\nSC7 popup pointer release\n"
+        self.input_text = "SC7 patched transport\nSC7 popup pointer release\n"
+        source.write_text(self.input_text, encoding="utf-8")
+        input_patch = self.git("diff", "--", "backend.txt").stdout
+        (self.patches / "wlroots-input.patch").write_text(
+            input_patch, encoding="utf-8"
+        )
+        input_id = subprocess.run(
+            ["git", "patch-id", "--stable"], input=input_patch,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()[0]
+        (self.patches / "WLROOTS_INPUT_PATCH_ID").write_text(
+            input_id + "\n", encoding="utf-8"
+        )
+        self.current_text = self.input_text + "SC7 cursor serial repair\n"
         source.write_text(self.current_text, encoding="utf-8")
         patch = self.git("diff", "--", "backend.txt").stdout
         (self.patches / "wlroots-sc7labs-rack.patch").write_text(
@@ -96,6 +109,16 @@ class BootstrapRerunTests(unittest.TestCase):
             "@@ -1 +1,2 @@\n"
             " SC7 patched transport\n"
             "+SC7 popup pointer release\n",
+            encoding="utf-8",
+        )
+        (self.patches / "wlroots-cursor-serial-fix.patch").write_text(
+            "diff --git a/backend.txt b/backend.txt\n"
+            "--- a/backend.txt\n"
+            "+++ b/backend.txt\n"
+            "@@ -1,2 +1,3 @@\n"
+            " SC7 patched transport\n"
+            " SC7 popup pointer release\n"
+            "+SC7 cursor serial repair\n",
             encoding="utf-8",
         )
         self.git("checkout", "--", "backend.txt")
@@ -203,6 +226,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.git("commit", "-qm", "build(wlroots): apply prior SC7Labs Rack patch")
         return self.git("rev-parse", "HEAD").stdout.strip()
 
+    def commit_input_patch(self) -> str:
+        self.git("apply", str(self.patches / "wlroots-input.patch"))
+        self.git("add", "backend.txt")
+        self.git("commit", "-qm", "build(wlroots): apply pointer release patch")
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
     def run_bootstrap(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(self.scripts / "bootstrap-wlroots.sh"), *args],
@@ -299,7 +328,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(self.commands(), before)
 
-    def test_legacy_patched_checkout_upgrades_through_both_fixes(self) -> None:
+    def test_legacy_patched_checkout_upgrades_through_all_fixes(self) -> None:
         legacy_sha = self.commit_legacy_patch()
         build = self.wlroots / "build"
         build.mkdir()
@@ -311,7 +340,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         result = self.run_bootstrap("--install-deps")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Upgrading the authentic legacy SC7Labs DnD patch", result.stdout)
-        self.assertIn("Legacy DnD patch upgraded without recloning", result.stdout)
+        self.assertIn("Authenticated wlroots source upgraded without recloning", result.stdout)
         self.assertEqual(
             (self.wlroots / "backend.txt").read_text(encoding="utf-8"),
             self.current_text,
@@ -351,6 +380,87 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(self.commands(), before)
 
+    def test_input_patched_checkout_upgrades_in_place_and_rebuilds(self) -> None:
+        input_sha = self.commit_input_patch()
+        build = self.wlroots / "build"
+        build.mkdir()
+        (build / "build.ninja").write_text("old graph\n", encoding="utf-8")
+        (build / "libwlroots.so.12").write_text(
+            "valid-symbol full-renderer\n", encoding="utf-8"
+        )
+        (build / ".sc7-patch-id").write_text(
+            (self.patches / "WLROOTS_INPUT_PATCH_ID").read_text(),
+            encoding="utf-8",
+        )
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Upgrading the authentic input-patched SC7Labs source", result.stdout)
+        self.assertEqual((self.wlroots / "backend.txt").read_text(), self.current_text)
+        self.assertNotEqual(self.git("rev-parse", "HEAD").stdout.strip(), input_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertTrue(any(command.startswith("meson setup --wipe")
+                            for command in self.commands()))
+        self.assertTrue(any(command.startswith("ninja ") for command in self.commands()))
+        self.assertFalse(any(command.startswith("blocked-network-git ")
+                             for command in self.commands()))
+        self.assertNotEqual(
+            (build / ".sc7-patch-id").read_text(),
+            (self.patches / "WLROOTS_INPUT_PATCH_ID").read_text(),
+        )
+
+        before = self.commands()
+        second = self.run_bootstrap("--install-deps")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.commands(), before)
+
+    def test_unrelated_tracked_change_to_input_patch_is_rejected(self) -> None:
+        input_sha = self.commit_input_patch()
+        (self.wlroots / "backend.txt").write_text(
+            self.input_text + "user modification\n", encoding="utf-8"
+        )
+        result = self.run_bootstrap("--install-deps")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uncommitted tracked source changes", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), input_sha)
+        self.assertEqual((self.wlroots / "backend.txt").read_text(),
+                         self.input_text + "user modification\n")
+        self.assertFalse(any(command.startswith("ninja ") for command in self.commands()))
+
+    def test_invalid_cursor_upgrade_rolls_back_before_commit(self) -> None:
+        input_sha = self.commit_input_patch()
+        migration = self.patches / "wlroots-cursor-serial-fix.patch"
+        migration.write_text(
+            migration.read_text(encoding="utf-8").replace(
+                "SC7 cursor serial repair", "SC7 unrelated cursor change"
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cursor serial fix does not produce the current SC7Labs patch",
+                      result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), input_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertEqual((self.wlroots / "backend.txt").read_text(), self.input_text)
+
+    def test_invalid_final_stage_rolls_back_all_legacy_migrations(self) -> None:
+        legacy_sha = self.commit_legacy_patch()
+        migration = self.patches / "wlroots-cursor-serial-fix.patch"
+        migration.write_text(
+            migration.read_text(encoding="utf-8").replace(
+                "SC7 cursor serial repair", "SC7 unrelated cursor change"
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cursor serial fix does not produce the current SC7Labs patch",
+                      result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), legacy_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertEqual((self.wlroots / "backend.txt").read_text(),
+                         "SC7 legacy transport\n")
+
     def test_unrelated_tracked_change_to_previous_patch_is_rejected(self) -> None:
         previous_sha = self.commit_previous_patch()
         (self.wlroots / "backend.txt").write_text(
@@ -374,7 +484,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         )
         result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("does not produce the current SC7Labs patch", result.stderr)
+        self.assertIn("does not produce the authenticated input source", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), previous_sha)
         self.assertEqual(self.git("status", "--porcelain").stdout, "")
         self.assertEqual((self.wlroots / "backend.txt").read_text(),

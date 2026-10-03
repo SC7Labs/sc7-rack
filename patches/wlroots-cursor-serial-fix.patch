@@ -1,0 +1,15 @@
+diff --git a/backend/wayland/dnd.c b/backend/wayland/dnd.c
+index 2cba7f8..2f96c4b 100644
+--- a/backend/wayland/dnd.c
++++ b/backend/wayland/dnd.c
+@@ -898,7 +898,9 @@ static void data_device_handle_enter(void *data, struct wl_data_device *dev,
+ 			wl_list_for_each(pointer, &seat->pointers, link) {
+ 				if (pointer->output == output) {
+ 					seat->active_pointer = pointer;
+-					output->cursor.pointer = pointer;
++					// Data-device enter carries a drag serial, not a
++					// wl_pointer.enter serial. Keep cursor ownership unset
++					// until a real pointer enter permits set_cursor.
+ 					break;
+ 				}
+ 			}
