@@ -148,12 +148,15 @@ def find_panes(nested_ipc: Path, env: dict[str, str]) -> dict[str, dict]:
 def build_trace(work: Path) -> Path:
     trace = work / "render-damage-trace.so"
     cflags = shlex.split(run(["pkg-config", "--cflags", "pixman-1",
-                              "wayland-server", "libdrm"]).stdout)
+                              "wayland-server", "wayland-client", "libdrm",
+                              "egl", "glesv2"]).stdout)
     run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
          "-fPIC", "-shared", "-DWLR_USE_UNSTABLE",
          "-I", str(ROOT / "vendor/wlroots/include"),
          "-I", str(ROOT / "vendor/wlroots/build/include"),
-         *cflags, str(TRACE_SOURCE), "-o", str(trace), "-ldl"])
+         *cflags, str(TRACE_SOURCE), str(ROOT / "tests/render_input_experiment.c"),
+         str(ROOT / "tests/render_output_experiment.c"),
+         "-o", str(trace), "-ldl"])
     return trace
 
 
@@ -308,11 +311,16 @@ def summarize_trace(path: Path) -> dict:
             and int(match.group(1)) >= 0]
     sizes = sorted(set(re.findall(r"size=(\d+x\d+)",
                                   "\n".join(acquire_lines))))
-    buffers = set(re.findall(r" buffer=(0x[0-9a-f]+)", "\n".join(lines)))
+    buffers = set(re.findall(r" buffer=(0x[0-9a-f]+)", "\n".join(acquire_lines)))
     buffer_kinds = sorted(set(re.findall(r" acquire .* kind=(\w+)",
                                          "\n".join(lines))))
     modifiers = sorted(set(re.findall(r" acquire .* modifier=(0x[0-9a-f]+)",
                                       "\n".join(lines))))
+    input_kinds = {}
+    for line in lines:
+        match = re.search(r" wl-buffer-attach .* pid=(\d+).* kind=(\S+)", line)
+        if match:
+            input_kinds.setdefault(match.group(1), set()).add(match.group(2))
     frame_commits = sum(" commit " in line and "buffer=0x" in line
                         and "ok=1" in line for line in lines)
     full_commits = partial_commits = 0
@@ -331,8 +339,16 @@ def summarize_trace(path: Path) -> dict:
         else:
             partial_commits += 1
     return {"acquires": len(ages), "buffer_ages": sorted(set(ages)),
-            "trace_truncated": any("trace-truncated" in line for line in lines),
+            "trace_truncated": any("trace-truncated" in line or "trace-rotated" in line
+                                   for line in lines),
             "buffer_identities": len(buffers), "sizes": sizes,
+            "input_buffer_kinds_by_pid": {pid: sorted(kinds) for pid, kinds in input_kinds.items()},
+            "buffer_release_events": sum(" buffer-release " in line for line in lines),
+            "buffer_destroy_events": sum(" buffer-destroy " in line for line in lines),
+            "pre_submit_captures": sum(" pre-submit " in line and "ok=1" in line for line in lines),
+            "fresh_input_rejected_updates": sum(" fresh-input-reject-update " in line for line in lines),
+            "fresh_targets": sum(" fresh-target " in line for line in lines),
+            "fresh_output_retirements": sum(" fresh-output-retire " in line for line in lines),
             "buffer_kinds": buffer_kinds, "modifiers": modifiers,
             "damage_queries": sum(" damage " in line for line in lines),
             "surface_damage_queries": sum(" surface-damage " in line
@@ -382,6 +398,14 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
     monitor_log = out / "monitor.log"
     trace = out / "render-trace.log"
     trace.write_text("")
+    trace.with_suffix(trace.suffix + ".previous").unlink(missing_ok=True)
+    capture_dir = out / "pre-submit"
+    capture_trigger = out / "capture-next"
+    if args.capture_presubmit:
+        capture_dir.mkdir(exist_ok=True)
+        for stale_capture in capture_dir.glob("pre-submit-*.ppm"):
+            stale_capture.unlink()
+        capture_trigger.unlink(missing_ok=True)
     for stale in (out / "report.json", out / "failure.json"):
         stale.unlink(missing_ok=True)
     host = nested = inner_process = None
@@ -404,7 +428,11 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
                           WLR_RENDERER="gles2" if renderer == "gles2-no-modifiers"
                           else renderer,
                           LD_LIBRARY_PATH=str(LOCAL_WLROOTS.resolve()),
-                          LD_PRELOAD=str(tracer), SC7_RENDER_TRACE=str(trace))
+                          LD_PRELOAD=str(tracer), SC7_RENDER_TRACE=str(trace),
+                          SC7_RENDER_EXPERIMENT=args.experiment)
+        if args.capture_presubmit:
+            nested_env.update(SC7_RENDER_CAPTURE_DIR=str(capture_dir),
+                              SC7_RENDER_CAPTURE_TRIGGER=str(capture_trigger))
         if renderer == "gles2-no-modifiers":
             nested_env["WLR_EGL_NO_MODIFIERS"] = "1"
         before = sockets(runtime)
@@ -445,6 +473,8 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
                      env=host_env)
         time.sleep(1.5)
         for cycle in range(args.cycles):
+            if args.capture_presubmit and cycle == 0:
+                capture_trigger.write_text("")
             width, height = SIZES[cycle % len(SIZES)]
             sway_command(host_ipc,
                          f"[con_id={host_node['id']}] resize set width "
@@ -489,6 +519,21 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
             if nested.poll() is not None or host.poll() is not None:
                 raise RuntimeError("a compositor exited during resize")
         telemetry = summarize_trace(trace)
+        tree = sway_query(nested_ipc, "get_tree", env=client_env)
+        (out / "tree-at-end.json").write_text(json.dumps(tree, indent=2) + "\n")
+        telemetry["input_buffer_kinds_by_app"] = {
+            node["app_id"]: telemetry["input_buffer_kinds_by_pid"].get(str(node.get("pid")), [])
+            for node in descendants(tree) if node.get("app_id")
+        }
+        captures = sorted(capture_dir.glob("pre-submit-*.ppm"))
+        if args.capture_presubmit:
+            if len(captures) != 1 or capture_trigger.exists():
+                raise AssertionError(f"expected one pre-submit frame: {captures}")
+            with Image.open(captures[0]) as presubmit:
+                if (presubmit.width < 100 or presubmit.height < 100 or
+                        not all(count_color(presubmit, color) > 100
+                                for color in PALETTE.values())):
+                    raise AssertionError("pre-submit frame lacks the expected panes")
         compositor_log = nested_log.read_text(errors="replace")
         telemetry["renderer_path"] = (
             "gles2" if "Creating GLES2 renderer" in compositor_log else
@@ -502,6 +547,7 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
         if (expected_kind not in telemetry["buffer_kinds"] or
                 telemetry["renderer_path"] != expected_renderer or
                 not telemetry["damage_queries"] or
+                len(telemetry["input_buffer_kinds_by_pid"]) < 4 or
                 not telemetry["frame_commits"] or
                 telemetry["import_failures"] or telemetry["trace_truncated"]):
             raise AssertionError(f"missing {expected_kind} buffer or damage telemetry: "
@@ -512,6 +558,15 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
         if args.full_repaint and telemetry["partial_frame_damage_commits"]:
             raise AssertionError("Sway full-repaint diagnostic left partial output damage: "
                                  f"{telemetry}")
+        if args.experiment == "fresh-output" and any(age != 0 for age in telemetry["buffer_ages"]):
+            raise AssertionError(f"fresh-output reused aged storage: {telemetry}")
+        required_experiment_event = {
+            "fresh-input": "fresh_input_rejected_updates",
+            "fresh-target": "fresh_targets",
+            "fresh-output": "fresh_output_retirements",
+        }.get(args.experiment)
+        if required_experiment_event and not telemetry[required_experiment_event]:
+            raise AssertionError(f"requested experiment was not exercised: {telemetry}")
         if renderer == "gles2-no-modifiers" and any(
                 value not in ("0x0000000000000000", "0xffffffffffffffff")
                 for value in telemetry["modifiers"]):
@@ -520,6 +575,8 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
         result = {
             "renderer": renderer, "host_renderer": args.host_renderer,
             "full_repaint": args.full_repaint,
+            "experiment": args.experiment,
+            "pre_submit_capture": str(captures[0]) if captures else None,
             "frames": frames, "trace": telemetry,
         }
         (out / "report.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -550,11 +607,18 @@ def main() -> None:
     parser.add_argument("--settle", type=float, default=0.35)
     parser.add_argument("--full-repaint", action="store_true",
                         help="use Sway's full-output rerender diagnostic")
+    parser.add_argument("--capture-presubmit", action="store_true",
+                        help="capture one composed frame before host output commit")
+    parser.add_argument("--experiment", default="observe",
+                        choices=("observe", "fresh-input", "fresh-target", "fresh-output"),
+                        help="test one resource lifetime hypothesis (diagnostic only)")
     parser.add_argument("--grim", type=Path,
                         default=Path(shutil.which("grim") or "/nonexistent/grim"))
     parser.add_argument("--artifacts", type=Path,
                         default=Path("/tmp/sc7-render-damage-results"))
     args = parser.parse_args()
+    if args.experiment == "fresh-target" and args.renderer not in ("gles2", "gles2-no-modifiers"):
+        parser.error("fresh-target requires --renderer gles2 or gles2-no-modifiers")
     if args.host_renderer == "auto":
         args.host_renderer = ("pixman" if args.renderer == "pixman"
                               else "gles2")

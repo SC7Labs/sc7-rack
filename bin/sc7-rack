@@ -302,7 +302,18 @@ if [[ "$FULL_REPAINT" == 1 ]]; then
     SWAY_ARGS=(-D damage=rerender "${SWAY_ARGS[@]}")
     echo "Rack diagnostic: full-output repaint enabled" >&2
 fi
-PATH="$SC7_RACK_PRIVATE_BIN:$PATH" "$SWAY_BIN" "${SWAY_ARGS[@]}" &
+if [[ -n "${SC7_RACK_RENDER_TRACE_LIB:-}" ]]; then
+    if [[ ! -f "$SC7_RACK_RENDER_TRACE_LIB" || "$SC7_RACK_RENDER_TRACE_LIB" =~ [[:space:]] ]]; then
+        echo "Error: Rack render tracer is missing or its path contains whitespace." >&2
+        exit 2
+    fi
+    # Scope the diagnostic preload to this compositor. The tracer clears its
+    # own LD_PRELOAD entry during library initialization before Sway starts apps.
+    PATH="$SC7_RACK_PRIVATE_BIN:$PATH" LD_PRELOAD="$SC7_RACK_RENDER_TRACE_LIB" \
+        "$SWAY_BIN" "${SWAY_ARGS[@]}" &
+else
+    PATH="$SC7_RACK_PRIVATE_BIN:$PATH" "$SWAY_BIN" "${SWAY_ARGS[@]}" &
+fi
 SWAY_PID=$!
 echo "$SWAY_PID" > "$PID_FILE"
 

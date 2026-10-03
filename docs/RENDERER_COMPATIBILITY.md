@@ -12,6 +12,14 @@ Disabling explicit modifiers is **not** a renderer fix. The live process tree
 contains only the expected four clients, so duplicate windows do not explain
 the observed pixels.
 
+Physical testing at `268bd5236296f35af834cd823cfbd09e412849b9` also corrupted
+under GLES2 with both `WLR_EGL_NO_MODIFIERS=1` and
+`SC7_RACK_FULL_REPAINT=1`. Repeating ordinary GLES2 corrupted again; Pixman
+remained clean. Full output repaint therefore does not correct this failure.
+The next diagnostic captures the composed frame before host submission and
+tests client texture imports, output targets, and output buffer reuse one at a
+time. See [resource diagnostics](RENDER_RESOURCE_DIAGNOSTICS.md).
+
 The wlroots 0.17.4 EGL code handles that setting in `render/egl.c`. It stops
 querying explicit format modifiers and advertises implicit and linear formats
 for EGL imports and renders. GLES2, GBM output allocation, and DMA-BUF remain
@@ -49,15 +57,12 @@ WLR_RENDERER=pixman ./bin/sc7-rack
 ```
 
 The second trial prints `Rack diagnostic: full-output repaint enabled` when
-the option is active. Repeat baseline → full repaint → baseline for comparable
-durations because the corruption can be intermittent; capture screenshots if
-it occurs. A consistently clean full-repaint run while both baseline runs
-corrupt would point to output damage or back-buffer preservation. If it still
-corrupts, inspect GLES2 source texture
-updates and DMA-BUF import/synchronization. Pixman reads SHM client buffers
+the option is active. Laptop2 has completed baseline → full repaint → baseline:
+all three GLES2 trials corrupted. Investigation now concerns GLES2 source
+textures, render targets, and DMA-BUF import/synchronization. Pixman reads SHM client buffers
 directly, while GLES2 can update a reused texture only in the client-reported
 damage region; full output repaint cannot repair an already stale source
-texture. No result from this physical experiment has been reported yet.
+texture. This is a remaining hypothesis, not a proven source of corruption.
 
 ## Physical CPU comparison before choosing a renderer default
 
@@ -98,7 +103,8 @@ python3 tests/render_damage_tests.py --renderer all --cycles 24 --full-repaint -
 
 Each command runs normal GLES2, GLES2 without explicit modifiers, and Pixman;
 the second adds Sway's full-repaint diagnostic. The test records buffer ages,
-identities, damage and commits, with the trace capped at 32 MiB per run. It
+identities, damage and commits, retaining two recent trace chunks of about
+16 MiB each. It
 checks that every nested output commit under full repaint covers the entire
 output. The screenshot detector catches other-pane sentinel colors inside
 Monitor; it cannot automatically recognize duplicated Monitor card pixels, so

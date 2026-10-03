@@ -152,9 +152,10 @@ rack
 Rack currently keeps the accelerated GLES2 renderer with explicit EGL DMA-BUF
 modifiers disabled inside its nested compositor. **Corruption has still occurred
 on laptop2 with this setting active.** `WLR_RENDERER=pixman ./bin/sc7-rack`
-is the known-clean control there. A full-output repaint diagnostic is available
-with `SC7_RACK_FULL_REPAINT=1 WLR_RENDERER=gles2 ./bin/sc7-rack`; it is not a
-validated fix. The physical A/B evidence and resize test are recorded in
+is the known-clean control there. Full-output repaint also failed the physical
+GLES2 test. Experimental [resource diagnostics](docs/RENDER_RESOURCE_DIAGNOSTICS.md)
+can capture the composed frame before it is sent to the host desktop and test
+texture/target/buffer reuse. The physical A/B evidence and resize test are recorded in
 [`docs/RENDERER_COMPATIBILITY.md`](docs/RENDERER_COMPATIBILITY.md).
 
 ### Exiting
