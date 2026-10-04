@@ -149,16 +149,19 @@ sc7-rack
 rack
 ```
 
-Rack’s private compositor now advertises SHM client buffers by default while
+Rack’s private compositor advertises SHM client buffers by default while
 keeping accelerated GLES2 rendering and output allocation on GPU systems.
 Plain `rack` uses this policy; no diagnostic flag is needed. Physical laptop2
 A/B testing found GLES2 + DMA-BUF inputs corrupt and GLES2 + SHM inputs clean
-on the same fresh installation. The candidate still needs the
-[fresh physical install gate](docs/RENDERER_COMPATIBILITY.md#dry-physical-install-gate).
+on the same installation. The SHM-input production policy subsequently passed
+repeated dry reinstall testing on laptop2 with plain `rack`, including
+Dashboard/CPU switching and repeated resizing.
+
 The exact DMA-BUF producer/import/driver defect remains unproven; see the
-[source and upstream audit](docs/DMABUF_INPUT_AUDIT.md). The separate Files
-long-session mutation blocker also remains open.
-The physical A/B evidence and resize test are recorded in
+[source and upstream audit](docs/DMABUF_INPUT_AUDIT.md). Long-session COSMIC
+Files validation on the main rig also remained healthy for New Folder,
+Copy/Paste, Move To, and Extract operations. The physical A/B evidence and
+resize testing are recorded in
 [`docs/RENDERER_COMPATIBILITY.md`](docs/RENDERER_COMPATIBILITY.md).
 
 ### Exiting
