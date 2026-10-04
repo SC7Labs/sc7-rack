@@ -27,8 +27,22 @@ The Monitor source in that frame is PID 28318, surface `0x5d5a3185bf50`,
 rejects in-place updates of immutable DMA-BUF textures and creates/imports a
 replacement. It is not evidence of a failed import.
 
-These are physical observations on AMD A6-5200/Radeon HD hardware. The precise
-defect remains unresolved; this change prepares the next discriminating test.
+At `66a3e7d64805fd1c7c3d8f5d9a1c521fa21f7789`, laptop2 reported another
+critical result in `run-20261003-221516.POqehP2D`: frame 462's **isolated
+Monitor GLES input is already corrupt**, as are its final pre-submit image and
+desktop. The source is PID 29867, surface ID 32, buffer 97, generation 132,
+597×307 linear ARGB8888 DMA-BUF, one plane, stride 2560, texture
+`0x6009e9dd9280`, GL texture 5, EGLImage `0x6009e9c4d6b0`. Raw CPU access remains
+unavailable.
+
+Buffer 97 is attached at frame 461 and remains current at the corrupt sample
+in frame 462. Its next release follows attachment of buffer 103 in frame 463.
+The physical trace shows no obvious premature release for this sample. Normal
+Rack composition is therefore a reduced suspect, and `hold-input` is not the
+next experiment. Source contents versus GLES import/sampling remains unresolved.
+
+These observations are on AMD A6-5200/Radeon HD hardware. The missing axis is
+**GLES2 renderer/output with client SHM input**; Pixman had changed both axes.
 
 ## One next laptop2 test
 
@@ -38,12 +52,12 @@ Close Rack, then use the existing clone from a terminal on the host desktop:
 cd ~/sc7-rack
 git pull --ff-only origin main
 ./install.sh
-./scripts/run-render-diagnostic.sh --renderer gles2 --mode observe --capture-inputs
+./scripts/run-render-diagnostic.sh --renderer gles2 --mode shm-input --capture-inputs
 ```
 
-Repeat the outer-window resizing and Dashboard/CPU switching that causes the
-failure. When corruption is visible, keep Monitor animating and run from
-another **host** terminal:
+First capture while Monitor is animating to verify the input transport. Then
+repeat Dashboard/CPU switching and outer-window resizing, and capture again if
+corruption appears. Use another **host** terminal:
 
 ```bash
 cd ~/sc7-rack
@@ -55,6 +69,52 @@ screenshot while corruption is visible. This is one observation experiment;
 no further renderer matrix is requested. The helper selects the live Rack PID
 and exact IPC socket, verifies that the run directory belongs to that PID, and
 converts only input captures bearing the composed frame's number.
+
+The helper now prints `shm-input verified: Monitor pid=... kind=shm; ...
+renderer=gles2` and saves `shm-input-frame-FRAME.json`. It requires a stable
+Monitor PID in both captured trees, real `wl-buffer-attach` records whose kinds
+are exclusively `shm`, a GLES2 render pass for the exact frame, and the isolated
+Monitor input capture. A copied SHM GLES texture can say `kind=owned-upload`;
+that is not substituted for attachment evidence. Missing Monitor, no fallback,
+DMA-BUF/mixed input, a different renderer or missing evidence is **UNVERIFIED**
+and makes the helper exit 3 after saving the captured artifacts. Do not treat
+such a run as the requested GLES2/SHM axis.
+
+If this verified axis stays clean, focus on client DMA-BUF contents,
+linux-dmabuf → EGLImage → GLES sampling and implicit synchronization on the old
+Radeon/Mesa path. If it corrupts, DMA-BUF input is not necessary and broader
+GLES renderer/driver behavior remains relevant. Monitor refusing SHM is a
+separate reported result; the runner does not replace it or select Pixman.
+
+## How shm-input changes capability negotiation
+
+Pinned Sway `sway/server.c:133` installs its security global filter before
+creating protocol globals. `server.c:147` calls
+`wlr_renderer_init_wl_shm`; `render/wlr_renderer.c:220` calls
+`wlr_shm_create_with_renderer`, and `types/wlr_shm.c:531` creates `wl_shm`.
+When DMA-BUF texture formats are available, `server.c:150–152` creates legacy
+`wl_drm` and `zwp_linux_dmabuf_v1` version 4. Their actual global creation is in
+`types/wlr_drm.c:249` and `types/wlr_linux_dmabuf_v1.c:958` respectively.
+
+The diagnostic module `tests/render_shm_input.c` wraps the public
+`wl_display_set_global_filter` API only with a nonempty trace and the exact
+`SC7_RENDER_EXPERIMENT=shm-input`. It chains Sway's existing callback and data,
+then rejects those two exact input protocol names at advertisement **and bind**.
+`wl_drm` must also be hidden because its PRIME path can import DMA-BUFs. SHM,
+other globals and security restrictions keep their normal behavior. Per-display
+state handles subsequent filter replacements, removal and display destruction.
+Protocol objects still initialize successfully; allocation failures are not
+simulated. Policy allocation/API failure terminates the diagnostic explicitly.
+
+The hook does not touch GLES2 initialization, DMA-BUF import implementation,
+output allocation or the nested backend's connection to host COSMIC. No buffer
+is converted after attachment. Only Rack Sway loads the preload, and its
+constructor removes it before children launch. Normal launches and host-opened
+applications load no policy hook. The runner rejects `shm-input` with Pixman.
+
+`shm-input-policy` and `input-capability` trace records describe installation
+and protocol filtering. `wl-buffer-attach ... pid=MONITOR_PID ... kind=shm`
+describes the actual received buffer independently of those policy records.
 
 ## Captures and interpretation
 
@@ -165,7 +225,7 @@ This mode is **not the selected next physical test**. No `copy-input` is added:
 copying would first sample the same suspect import. Normal Rack launches load
 none of this diagnostic preload and retain their existing renderer policy.
 
-## Bounds and local verification
+## Input-capture baseline verification
 
 Trace storage remains two chunks of about 16 MiB. There are at most eight
 manual requests per run, eight distinct client textures and eight million
@@ -201,5 +261,60 @@ Validation on the development host:
 The Pixman workload used real COSMIC Monitor and three colored terminal
 stand-ins. Its four panes used SHM; this validates the capture integration and
 control, not laptop2's DMA-BUF/Mesa path. Local EGL tests use software Mesa and
-cannot establish correctness on the Radeon hardware. Laptop2's new per-input
-capture, sustained Monitor runtime and view switching remain to be performed.
+cannot establish correctness on the Radeon hardware. Laptop2 has now completed
+the per-input capture with the corrupt result above. Its new SHM-input axis,
+sustained runtime and view switching remain to be performed.
+
+## SHM-input validation
+
+The eight focused capability tests use real Wayland registries, requests and
+wlroots SHM storage/commits. DMA-BUF/legacy DRM globals are minimal registry
+fixtures; they do not test Radeon allocation or actual DMA-BUF importing.
+Controls cover normal, observe, misspelled mode, missing/empty trace and an
+unpreloaded process. All continue advertising both GPU input protocols.
+The exact diagnostic hides both, keeps SHM, rejects explicit binds to known
+hidden global IDs, preserves original/replaced filters and callback data, and
+survives independent display teardown/recreation. Repeated SHM commit/read/
+release testing covers 256 commits across two displays.
+
+Nine evidence-verifier tests reject DMA-BUF/mixed input, Pixman masquerading
+as requested GLES2, changed/absent Monitor PIDs, missing attachment evidence,
+another client's SHM buffers and input captures from a different frame.
+Same-frame DMA-BUF/unknown/missing sample kinds are rejected even if older
+attachment records say SHM. Rotated trace chunks remain usable. The runner and
+capture-helper integration preserve GLES2, preload isolation and exact-frame
+verification.
+
+| Current check | Result |
+| --- | --- |
+| Complete Python discovery, including bootstrap/install and unit suites | 196/196 |
+| SHM capability/real protocol tests | 8/8, included above |
+| Transport evidence verifier, including sample-kind rejection | 9/9, included above |
+| Diagnostic workflow | 17/17, included above |
+| Acceptance, disposable settings and private sockets | 41/41 |
+| Existing Files environment/source/CLI parity | 33/33 |
+| Popup lifecycle and launcher/host-leave menu input | 100 cycles per path |
+| Pointer backend and cursor/DnD boundary | 256 / 128 cycles plus historical negative controls |
+| DnD lifetime | 240 selections, 480 cancellations/unfocused drops, 240 outgoing endings; retained transfer and negative control passed |
+| Clipboard state sanitizer | 2,000 cycles, 4,029 offers reclaimed; ASan/UBSan/LSan clean |
+| Host-open bridge | 11/11, including 100 repeated launch cycles |
+| Pixman integration control, expanded preload | 4/4 outer resizes; real Monitor plus three terminal stand-ins; five input captures; no leakage/import failure |
+| Pinned bootstrap verification | `--check` passed; tracked vendor trees clean |
+
+The first host-leave menu test failed at cycle 78 while several compositor
+suites ran concurrently; the identical test then passed 100 cycles alone.
+A placement transaction applied near the failure and the harness caches its
+parent coordinates. A fixture timing race is plausible, but its cause is not
+proved. The failing and passing logs are retained; this diagnostic does not
+modify the tested Sway/input binaries.
+
+An intermediate capture-limit test exceeded its fixture timeout because the
+helper continued polling after an already recorded exhausted budget. The
+helper now reports that limit immediately without requesting another frame,
+including when the limit record is in the previous trace chunk. The final
+196-test discovery passes with that correction.
+
+The development host has no accessible DRM render node. Its registry/SHM
+tests and software EGL tests cannot prove COSMIC Monitor's physical GLES2/SHM
+fallback or Radeon behavior. The single laptop2 command above supplies that
+remaining evidence.

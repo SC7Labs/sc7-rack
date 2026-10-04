@@ -155,8 +155,9 @@ on laptop2 with this setting active.** `WLR_RENDERER=pixman ./bin/sc7-rack`
 is the known-clean control there. Full-output repaint also failed the physical
 GLES2 test. Fresh input, target and output experiments also corrupted, with
 corruption already present before host submission. Experimental
-[input diagnostics](docs/RENDER_INPUT_DIAGNOSTICS.md) now compare each sampled
-client texture with the final composed frame and trace actual buffer releases.
+[input diagnostics](docs/RENDER_INPUT_DIAGNOSTICS.md) found the isolated Monitor
+GLES input already corrupt. The next diagnostic keeps GLES2 active while
+negotiating SHM client input, with actual transport verification.
 The physical A/B evidence and resize test are recorded in
 [`docs/RENDERER_COMPATIBILITY.md`](docs/RENDERER_COMPATIBILITY.md).
 

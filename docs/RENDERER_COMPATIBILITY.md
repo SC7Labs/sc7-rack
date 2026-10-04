@@ -19,8 +19,10 @@ remained clean. Full output repaint therefore does not correct this failure.
 All three subsequent resource experiments also corrupted at `eb5085ac`:
 fresh input imports, fresh target identity, and fresh output storage. Fresh-output
 frame 447 was corrupt before host submission with new storage, age zero and
-full damage. The next single test captures each sampled client input and the
-final composed frame. See [input diagnostics](RENDER_INPUT_DIAGNOSTICS.md) for
+full damage. The isolated Monitor GLES input also corrupted at frame 462 in
+the next physical capture. The next single test keeps GLES2 rendering/output
+and removes nested DMA-BUF input capabilities, verifying actual Monitor SHM
+attachments. See [input diagnostics](RENDER_INPUT_DIAGNOSTICS.md) for
 the physical procedure and ownership audit, and
 [resource diagnostics](RENDER_RESOURCE_DIAGNOSTICS.md) for the earlier experiments.
 

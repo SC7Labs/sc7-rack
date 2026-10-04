@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage: scripts/run-render-diagnostic.sh [--renderer gles2|pixman]
-       [--mode observe|fresh-input|fresh-target|fresh-output|hold-input]
+       [--mode observe|fresh-input|fresh-target|fresh-output|hold-input|shm-input]
        [--capture-inputs]
 
 Launch Rack with a bounded renderer trace and one-shot pre-submit capture.
@@ -27,8 +27,8 @@ while (( $# )); do
     esac
 done
 case "$renderer" in gles2|pixman) ;; *) usage >&2; exit 2 ;; esac
-case "$experiment" in observe|fresh-input|fresh-target|fresh-output|hold-input) ;; *) usage >&2; exit 2 ;; esac
-if [[ ( "$experiment" == fresh-target || "$experiment" == hold-input ) && "$renderer" != gles2 ]]; then
+case "$experiment" in observe|fresh-input|fresh-target|fresh-output|hold-input|shm-input) ;; *) usage >&2; exit 2 ;; esac
+if [[ ( "$experiment" == fresh-target || "$experiment" == hold-input || "$experiment" == shm-input ) && "$renderer" != gles2 ]]; then
     echo "Error: $experiment requires GLES2." >&2
     exit 2
 fi
@@ -105,6 +105,7 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC -shared -DWLR_USE_UNSTABLE \
     "$project_root/tests/render_raw_snapshot.c" \
     "$project_root/tests/render_protocol_trace.c" \
     "$project_root/tests/render_hold_input.c" \
+    "$project_root/tests/render_shm_input.c" \
     -o "$trace_lib" "${libs[@]}" -ldl
 
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -135,6 +136,9 @@ printf 'Renderer diagnostic artifacts: %s\n' "$artifact_dir"
 printf 'Renderer: %s; experiment: %s\n' "$renderer" "$experiment"
 printf 'When corruption is visible, run in another host terminal:\n  %q\n' "$project_root/scripts/capture-render-frame.sh"
 printf 'Keep Rack visible and Monitor animating so the next composed frame can be captured.\n'
+if [[ "$experiment" == shm-input ]]; then
+    printf 'Capture once to verify Monitor kind=shm with renderer=gles2, then exercise Dashboard/CPU and repeated resizing.\n'
+fi
 printf 'The trace log is bounded; find it at %s\n' "$trace_log"
 
 "$launcher" &

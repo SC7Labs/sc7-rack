@@ -19,8 +19,8 @@ at `eb5085ac40bcadbf52896b977b349d3d4689bf52`:
 The four expected clients remain alive. In fresh-output frame 447 the
 pre-submit image is already corrupt, despite new output storage, age zero,
 a new EGLImage and full damage. Ordinary output reuse and host submission
-cannot explain that capture. The next test compares the existing sampled
-client texture with the final image of the same frame; see
+cannot explain that capture. The subsequent isolated Monitor texture is also
+corrupt at frame 462. The next test keeps GLES2 with SHM client input; see
 [input diagnostics and ownership audit](RENDER_INPUT_DIAGNOSTICS.md).
 
 ## Source audit
@@ -57,7 +57,7 @@ Update the existing clone on laptop2 and close Rack before each trial:
 cd ~/sc7-rack
 git pull --ff-only origin main
 ./install.sh
-./scripts/run-render-diagnostic.sh --renderer gles2 --mode observe --capture-inputs
+./scripts/run-render-diagnostic.sh --renderer gles2 --mode shm-input --capture-inputs
 ```
 
 The runner prints a persistent artifact directory. Reproduce the corruption
@@ -202,8 +202,8 @@ Physical GLES2 testing remains necessary.
 ## Resource-diagnostic baseline validation, 2026-10-03
 
 These totals cover the preceding resource experiments. Current input-capture
-validation and the new 177-test total are recorded in
-[input diagnostics](RENDER_INPUT_DIAGNOSTICS.md#bounds-and-local-verification).
+validation are recorded in
+[input diagnostics](RENDER_INPUT_DIAGNOSTICS.md#shm-input-validation).
 
 | Check | Result |
 | --- | --- |
@@ -237,6 +237,7 @@ GLES2 factory, including retained host ownership, failed allocation/import,
 and repeated destruction. The main rig has no DRM render node, so its real
 GLES2 FBO/EGLImage path remains untested here. Laptop2 has now supplied the
 pre-submit comparison and all three resource results, with corruption in each.
-The new per-input comparison and the 60-second CPU comparison remain pending.
+The per-input comparison has now found corrupt Monitor GLES input. The new
+GLES2/SHM axis and the 60-second CPU comparison remain pending.
 The exact defective resource and a production renderer fix/default policy are
 not yet established.

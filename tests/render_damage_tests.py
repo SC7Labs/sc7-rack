@@ -160,6 +160,7 @@ def build_trace(work: Path) -> Path:
          str(ROOT / "tests/render_raw_snapshot.c"),
          str(ROOT / "tests/render_protocol_trace.c"),
          str(ROOT / "tests/render_hold_input.c"),
+         str(ROOT / "tests/render_shm_input.c"),
          "-o", str(trace), "-ldl"])
     return trace
 
@@ -353,6 +354,7 @@ def summarize_trace(path: Path) -> dict:
             "input_captures": sum(" input-capture " in line for line in lines),
             "wire_buffer_releases": sum(" wl-buffer-release-sent " in line for line in lines),
             "hold_input_buffers": sum(" hold-input-retain " in line for line in lines),
+            "shm_input_policies": sum(" shm-input-policy " in line for line in lines),
             "fresh_input_rejected_updates": sum(" fresh-input-reject-update " in line for line in lines),
             "fresh_targets": sum(" fresh-target " in line for line in lines),
             "fresh_output_retirements": sum(" fresh-output-retire " in line for line in lines),
@@ -583,9 +585,14 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
             "fresh-target": "fresh_targets",
             "fresh-output": "fresh_output_retirements",
             "hold-input": "hold_input_buffers",
+            "shm-input": "shm_input_policies",
         }.get(args.experiment)
         if required_experiment_event and not telemetry[required_experiment_event]:
             raise AssertionError(f"requested experiment was not exercised: {telemetry}")
+        if args.experiment == "shm-input":
+            kinds = telemetry["input_buffer_kinds_by_app"].get("com.system76.CosmicMonitor", [])
+            if kinds != ["shm"]:
+                raise AssertionError(f"Monitor did not negotiate SHM input: {kinds}")
         if renderer == "gles2-no-modifiers" and any(
                 value not in ("0x0000000000000000", "0xffffffffffffffff")
                 for value in telemetry["modifiers"]):
@@ -631,7 +638,7 @@ def main() -> None:
     parser.add_argument("--capture-inputs", action="store_true",
                         help="also capture exact client textures sampled for that frame")
     parser.add_argument("--experiment", default="observe",
-                        choices=("observe", "fresh-input", "fresh-target", "fresh-output", "hold-input"),
+                        choices=("observe", "fresh-input", "fresh-target", "fresh-output", "hold-input", "shm-input"),
                         help="test one resource lifetime hypothesis (diagnostic only)")
     parser.add_argument("--grim", type=Path,
                         default=Path(shutil.which("grim") or "/nonexistent/grim"))
@@ -640,7 +647,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.capture_inputs:
         args.capture_presubmit = True
-    if args.experiment in ("fresh-target", "hold-input") and args.renderer not in ("gles2", "gles2-no-modifiers"):
+    if args.experiment in ("fresh-target", "hold-input", "shm-input") and args.renderer not in ("gles2", "gles2-no-modifiers"):
         parser.error(f"{args.experiment} requires --renderer gles2 or gles2-no-modifiers")
     if args.host_renderer == "auto":
         args.host_renderer = ("pixman" if args.renderer == "pixman"

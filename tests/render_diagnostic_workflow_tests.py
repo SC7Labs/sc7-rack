@@ -89,6 +89,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
     def test_invalid_modes_and_renderers_are_rejected_before_build_or_launch(self):
         for args in (("--mode", "invalid"), ("--renderer", "vulkan"),
                      ("--renderer", "pixman", "--mode", "fresh-target"),
+                     ("--renderer", "pixman", "--mode", "shm-input"),
                      ("--mode",), ("--unexpected",)):
             with self.subTest(args=args):
                 result = self.run_runner(*args)
@@ -102,6 +103,16 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("pinned local Sway", result.stderr)
         self.assertFalse((self.work / "compiled").exists())
+
+    def test_shm_input_keeps_gles2_and_selects_only_requested_diagnostic(self):
+        result = self.run_runner("--renderer", "gles2", "--mode", "shm-input", "--capture-inputs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        environment = json.loads((self.work / "launch.json").read_text())["environment"]
+        self.assertEqual(environment["WLR_RENDERER"], "gles2")
+        self.assertEqual(environment["SC7_RENDER_EXPERIMENT"], "shm-input")
+        self.assertEqual(environment["SC7_RENDER_CAPTURE_INPUTS"], "1")
+        self.assertEqual(environment["SC7_RACK_FULL_REPAINT"], "0")
+        self.assertIsNone(environment["LD_PRELOAD"])
 
     def test_runner_scopes_preload_to_launcher_variable_and_cleans_temporary_library(self):
         result = self.run_runner("--renderer", "gles2", "--mode", "fresh-input", "--capture-inputs")
@@ -155,7 +166,7 @@ class DiagnosticCaptureTests(unittest.TestCase):
                    "import json, os, sys\n"
                    "with open(os.environ['SC7_TEST_IPC_CALLS'], 'a') as out:\n"
                    "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-                   "print('{}' if 'get_tree' in sys.argv else '[]')\n")
+                   "print(os.environ.get('SC7_TEST_TREE_JSON', '{}') if 'get_tree' in sys.argv else '[]')\n")
         executable(self.mockbin / "grim", "#!/bin/sh\nexit 1\n")
         executable(self.mockbin / "sleep", "#!/usr/bin/python3\nimport time\ntime.sleep(.002)\n")
         self.env = os.environ.copy()
@@ -166,8 +177,9 @@ class DiagnosticCaptureTests(unittest.TestCase):
         self.sockets = []
         self.addCleanup(lambda: [sock.close() for sock in self.sockets])
 
-    def start_idle(self, diagnostic):
+    def start_idle(self, diagnostic, extra_env=None):
         env = self.env.copy()
+        env.update(extra_env or {})
         names = ("SC7_RENDER_CAPTURE_DIR", "SC7_RENDER_CAPTURE_TRIGGER", "SC7_RENDER_TRACE")
         for name in names:
             env.pop(name, None)
@@ -252,6 +264,26 @@ class DiagnosticCaptureTests(unittest.TestCase):
         self.assertFalse((self.work / "ipc-calls.jsonl").exists())
         self.assertFalse((self.artifacts / "capture-now").exists())
 
+    def test_shm_input_capture_runs_transport_verification_for_exact_frame(self):
+        process = self.start_idle(True, {"SC7_RENDER_EXPERIMENT": "shm-input", "WLR_RENDERER": "gles2"})
+        self.ipc_socket(process.pid)
+        monitor_pid = process.pid + 100
+        self.env["SC7_TEST_TREE_JSON"] = json.dumps({"nodes": [
+            {"app_id": "com.system76.CosmicMonitor", "pid": monitor_pid}]})
+        (self.artifacts / "render-trace.log").write_text(
+            f"1 wl-buffer-attach resource=0x1 id=97 pid={monitor_pid} kind=shm size=597x307\n"
+            "2 render-begin frame=7 renderer=gles2 buffer=0x2 size=1214x624\n"
+            f"3 input-capture frame=7 pid={monitor_pid} kind=owned-upload gles_status=1 gles_reason=ok\n")
+        thread, errors = self.produce_after_trigger("pre-submit-000000000007.ppm",
+                                                   b"P6\n1 1\n255\n\x00\x00\x00")
+        result = self.run_capture()
+        thread.join(2)
+        self.assertEqual(errors, [])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"shm-input verified: Monitor pid={monitor_pid} kind=shm", result.stdout)
+        evidence = self.artifacts / "shm-input-frame-000000000007.json"
+        self.assertTrue(json.loads(evidence.read_text())["verified"])
+
     def test_input_png_alpha_and_manifest_use_only_the_exact_composed_frame(self):
         self.ipc_socket(self.process.pid)
         captures = self.artifacts / "captures"
@@ -316,6 +348,7 @@ class DiagnosticCaptureTests(unittest.TestCase):
         self.assertIn("limit reached", result.stderr)
         self.assertIn("Restart", result.stderr)
         self.assertEqual(list((self.artifacts / "captures").glob("*.png")), [])
+        self.assertFalse((self.artifacts / "capture-now").exists())
 
     def test_old_explicit_artifact_directory_is_rejected_without_mutating_evidence(self):
         self.ipc_socket(self.process.pid)
@@ -368,6 +401,7 @@ class TracerPreloadIsolationTests(unittest.TestCase):
                                  str(ROOT / "tests/render_raw_snapshot.c"),
                                  str(ROOT / "tests/render_protocol_trace.c"),
                                  str(ROOT / "tests/render_hold_input.c"),
+                                 str(ROOT / "tests/render_shm_input.c"),
                                  "-o", str(cls.library), *shlex.split(flags.stdout), "-ldl"],
                                 capture_output=True, text=True)
         if result.returncode:

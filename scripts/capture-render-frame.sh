@@ -79,6 +79,18 @@ swaymsg -s "$ipc" -t get_tree -r > "$artifact_dir/tree-before-capture.json"
 swaymsg -s "$ipc" -t get_outputs -r > "$artifact_dir/outputs-before-capture.json"
 printf '%s\n' "$runtime_metadata" > "$artifact_dir/runtime.json"
 
+capture_limit_reached() {
+    for trace_chunk in "$artifact_dir/render-trace.log" "$artifact_dir/render-trace.log.previous"; do
+        if [[ -f "$trace_chunk" ]] && grep -q ' pre-submit .*reason=capture-limit' "$trace_chunk"; then
+            return 0
+        fi
+    done
+    return 1
+}
+if capture_limit_reached; then
+    echo "Capture limit reached (8 per run). Restart the diagnostic for more captures." >&2
+    exit 2
+fi
 before=()
 shopt -s nullglob
 before=("$artifact_dir"/captures/pre-submit-*.ppm)
@@ -97,8 +109,7 @@ for (( attempt=0; attempt<100; ++attempt )); do
     sleep 0.05
 done
 if [[ -z "$capture" ]]; then
-    if [[ -f "$artifact_dir/render-trace.log" ]] &&
-            grep -q 'reason=capture-limit' "$artifact_dir/render-trace.log"; then
+    if capture_limit_reached; then
         echo "Capture limit reached (8 per run). Restart the diagnostic for more captures." >&2
         exit 2
     fi
@@ -169,3 +180,14 @@ else
     printf 'Take a desktop screenshot while the corruption remains visible; save it in %s\n' "$artifact_dir"
 fi
 printf 'Trace and client structure: %s\n' "$artifact_dir"
+if python3 - "$artifact_dir/runtime.json" <<'PY'
+import json, sys
+raise SystemExit(0 if json.load(open(sys.argv[1])).get('environment', {}).get(
+    'SC7_RENDER_EXPERIMENT') == 'shm-input' else 1)
+PY
+then
+    frame_name="${capture##*/pre-submit-}"
+    frame_name="${frame_name%.ppm}"
+    python3 "$(dirname "$(readlink -f "$0")")/verify-render-input-transport.py" \
+        "$artifact_dir" "$((10#$frame_name))"
+fi
