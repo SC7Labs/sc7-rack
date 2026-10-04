@@ -59,7 +59,7 @@ try:
 except (OSError, ValueError) as error:
     raise SystemExit(f'Error: {error}.')
 allowed = {'WLR_RENDERER', 'WLR_BACKENDS', 'WLR_EGL_NO_MODIFIERS',
-           'SC7_RENDER_EXPERIMENT', 'SC7_RACK_FULL_REPAINT', *expected}
+           'SC7_RENDER_EXPERIMENT', 'SC7_RENDER_CAPTURE_INPUTS', 'SC7_RACK_FULL_REPAINT', *expected}
 print(json.dumps({
     'pid': int(sys.argv[1]),
     'environment': {name: value for name, value in environment.items() if name in allowed},
@@ -108,23 +108,58 @@ fi
 
 # Encode the captured PPM as PNG using only Python's standard library.
 png="${capture%.ppm}.png"
-python3 - "$capture" "$png" <<'PY'
-import pathlib, struct, sys, zlib
-with open(sys.argv[1], 'rb') as source:
-    if source.readline() != b'P6\n':
-        raise SystemExit('Invalid diagnostic PPM header')
-    width, height = map(int, source.readline().split())
-    if source.readline() != b'255\n' or not (0 < width <= 4096 and 0 < height <= 4096):
-        raise SystemExit('Invalid diagnostic PPM dimensions')
-    pixels = source.read()
-if len(pixels) != width * height * 3:
-    raise SystemExit('Incomplete diagnostic capture')
+python3 - "$capture" "$png" "$artifact_dir" <<'PY'
+import json, pathlib, re, struct, sys, zlib
+def read_image(path, magic, channels):
+    with path.open('rb') as source:
+        if source.readline() != magic + b'\n':
+            raise SystemExit('Invalid diagnostic PPM header')
+        width, height = map(int, source.readline().split())
+        if source.readline() != b'255\n' or not (0 < width <= 4096 and 0 < height <= 4096):
+            raise SystemExit('Invalid diagnostic PPM dimensions')
+        pixels = source.read()
+    if len(pixels) != width * height * channels:
+        raise SystemExit('Incomplete diagnostic capture')
+    return width, height, pixels
 def chunk(kind, data):
     return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
-rows = b''.join(b'\0' + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
-pathlib.Path(sys.argv[2]).write_bytes(b'\x89PNG\r\n\x1a\n' +
-    chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
-    chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+def encode(ppm, png, use_alpha=False):
+    width, height, pixels = read_image(ppm, b'P6', 3)
+    alpha_path = pathlib.Path(str(ppm) + '.alpha.pgm')
+    has_alpha = use_alpha and alpha_path.is_file()
+    channels = 4 if has_alpha else 3
+    if has_alpha:
+        aw, ah, alpha = read_image(alpha_path, b'P5', 1)
+        if (aw, ah) != (width, height):
+            raise SystemExit('Input RGB and alpha dimensions differ')
+        rgba = bytearray(width * height * 4)
+        rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4] = (
+            pixels[0::3], pixels[1::3], pixels[2::3], alpha)
+        pixels = rgba
+    rows = b''.join(b'\0' + pixels[y * width * channels:(y + 1) * width * channels]
+                    for y in range(height))
+    png.write_bytes(b'\x89PNG\r\n\x1a\n' +
+        chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6 if has_alpha else 2, 0, 0, 0)) +
+        chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+    return {'file': png.name, 'size': [width, height], 'alpha': has_alpha}
+capture, png, directory = map(pathlib.Path, sys.argv[1:])
+encode(capture, png)
+frame_string = re.fullmatch(r'pre-submit-(\d+)\.ppm', capture.name)[1]
+frame = int(frame_string)
+inputs = [encode(path, path.with_suffix('.png'), True)
+          for path in sorted(capture.parent.glob(f'frame-{frame_string}-*-input-*.ppm'))]
+records = []
+for suffix in ('.previous', ''):
+    trace = directory / ('render-trace.log' + suffix)
+    if trace.is_file():
+        for line in trace.read_text(errors='replace').splitlines():
+            if (' input-capture' in line and re.search(rf'\bframe={frame}\b', line)):
+                records.append(line)
+manifest = capture.with_name(f'pre-submit-{frame_string}-inputs.json')
+manifest.write_text(json.dumps({'frame': frame, 'input_images': inputs,
+                               'input_trace': records}, indent=2) + '\n')
+if inputs or records:
+    print(f'Input snapshots and exact frame metadata: {manifest}')
 PY
 swaymsg -s "$ipc" -t get_tree -r > "$artifact_dir/tree-at-capture.json"
 printf 'Pre-submit frame: %s\n' "$png"

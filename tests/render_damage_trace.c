@@ -25,6 +25,10 @@
 #include "render/egl.h"
 #include "render/pixman.h"
 #include "render_output_experiment.h"
+#include "render_input_capture.h"
+#include "render_raw_snapshot.h"
+#include "render_protocol_trace.h"
+#include "render_hold_input.h"
 
 static FILE *trace_file(void);
 static uint64_t now_us(void);
@@ -41,7 +45,46 @@ static struct wlr_renderer *active_renderer;
 static struct wlr_buffer *active_buffer;
 static bool active_scene_frame;
 static uint64_t render_frame;
+static uint64_t active_frame;
 static unsigned int capture_attempts;
+static uint64_t input_capture_frame;
+static struct wlr_texture *captured_inputs[8];
+static size_t captured_input_count, captured_input_pixels;
+static struct wl_listener held_renderer_destroy;
+static struct wlr_renderer *held_renderer;
+
+static void finish_held_inputs(void) {
+    void (*finish)(void) = dlsym(RTLD_DEFAULT, "glFinish");
+    sc7_render_finish_held_inputs(finish);
+}
+
+static void renderer_destroy_held_inputs(struct wl_listener *listener, void *data) {
+    (void)listener; (void)data;
+    if (sc7_render_held_input_count() && held_renderer &&
+            wlr_renderer_is_gles2(held_renderer)) {
+        struct wlr_gles2_renderer *gles = (void *)held_renderer;
+        struct wlr_egl_context saved;
+        wlr_egl_save_context(&saved);
+        if (wlr_egl_make_current(gles->egl)) { finish_held_inputs(); }
+        wlr_egl_restore_context(&saved);
+    }
+    wl_list_remove(&held_renderer_destroy.link);
+    held_renderer = NULL;
+}
+
+static void watch_held_renderer(struct wlr_renderer *renderer) {
+    if (held_renderer == renderer) { return; }
+    if (held_renderer) {
+        renderer_destroy_held_inputs(&held_renderer_destroy, NULL);
+    }
+    held_renderer = renderer;
+    held_renderer_destroy.notify = renderer_destroy_held_inputs;
+    wl_signal_add(&renderer->events.destroy, &held_renderer_destroy);
+}
+
+uint64_t sc7_render_trace_frame(void) {
+    return active_pass ? active_frame : render_frame;
+}
 
 static void capture_pre_submit(uint64_t frame) {
     const char *trigger = getenv("SC7_RENDER_CAPTURE_TRIGGER");
@@ -51,6 +94,11 @@ static void capture_pre_submit(uint64_t frame) {
             !active_scene_frame) {
         return;
     }
+    const char *inputs = getenv("SC7_RENDER_CAPTURE_INPUTS");
+    /* A trigger arriving mid-pass must wait for the next whole scene, rather
+     * than pair the final output with an incomplete set of client inputs. */
+    if (inputs && strcmp(inputs, "1") == 0 && input_capture_frame != frame &&
+            capture_attempts < 8) { return; }
     /* One trigger captures one completed render pass before output commit. */
     unlink(trigger);
     uint32_t width = active_buffer->width, height = active_buffer->height;
@@ -188,6 +236,8 @@ static void capture_pre_submit(uint64_t frame) {
             ok ? path : "<none>", ok);
     }
     free(pixels);
+    input_capture_frame = 0;
+    captured_input_count = captured_input_pixels = 0;
 }
 
 static FILE *trace_file(void) {
@@ -233,6 +283,8 @@ struct watched_buffer {
     struct wl_list link;
     struct wlr_buffer *buffer;
     uint64_t generation;
+    uint32_t resource_id;
+    pid_t pid;
     struct wl_listener release;
     struct wl_listener destroy;
 };
@@ -323,6 +375,7 @@ struct wlr_buffer *wlr_buffer_try_from_resource(struct wl_resource *resource) {
     if (!next) { next = dlsym(RTLD_NEXT, "wlr_buffer_try_from_resource"); }
     struct wlr_buffer *buffer = next(resource);
     uint64_t generation = watch_buffer(buffer);
+    sc7_render_protocol_resource_buffer(resource, buffer);
     const char *kind = buffer ? "other" : "none";
     uint32_t format = 0;
     uint64_t modifier = 0;
@@ -335,6 +388,14 @@ struct wlr_buffer *wlr_buffer_try_from_resource(struct wl_resource *resource) {
     }
     pid_t pid = 0;
     wl_client_get_credentials(wl_resource_get_client(resource), &pid, NULL, NULL);
+    struct watched_buffer *buffer_watch;
+    wl_list_for_each(buffer_watch, &watched_buffers, link) {
+        if (buffer_watch->buffer == buffer) {
+            buffer_watch->resource_id = wl_resource_get_id(resource);
+            buffer_watch->pid = pid;
+            break;
+        }
+    }
     if (!wl_resource_get_destroy_listener(resource, resource_destroyed)) {
         struct watched_resource *watch = calloc(1, sizeof(*watch));
         if (watch) {
@@ -357,12 +418,165 @@ struct wlr_buffer *wlr_buffer_try_from_resource(struct wl_resource *resource) {
     return buffer;
 }
 
+struct sampled_surface {
+    struct wl_list link;
+    struct wl_listener destroy;
+    struct wlr_surface *surface;
+    struct wlr_texture *texture;
+    struct wlr_buffer *source;
+    uint64_t generation, observation;
+    pid_t pid;
+    uint32_t id;
+};
+static struct wl_list sampled_surfaces = {&sampled_surfaces, &sampled_surfaces};
+static uint64_t surface_observation;
+
+static void sampled_surface_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct sampled_surface *entry = wl_container_of(listener, entry, destroy);
+    wl_list_remove(&entry->destroy.link);
+    wl_list_remove(&entry->link);
+    free(entry);
+}
+
+static struct wlr_buffer *sampled_texture_source(struct wlr_texture *texture) {
+    if (texture && wlr_texture_is_gles2(texture)) {
+        return ((struct wlr_gles2_texture *)texture)->buffer;
+    }
+    if (texture && wlr_texture_is_pixman(texture)) {
+        return ((struct wlr_pixman_texture *)texture)->buffer;
+    }
+    return NULL;
+}
+
+static void observe_sampled_surface(struct wlr_surface *surface,
+        struct wlr_texture *texture) {
+    struct sampled_surface *entry = NULL, *candidate;
+    wl_list_for_each(candidate, &sampled_surfaces, link) {
+        if (candidate->surface == surface) { entry = candidate; break; }
+    }
+    if (!entry) {
+        entry = calloc(1, sizeof(*entry));
+        if (!entry) { return; }
+        entry->surface = surface;
+        entry->destroy.notify = sampled_surface_destroy;
+        wl_signal_add(&surface->events.destroy, &entry->destroy);
+        wl_list_insert(&sampled_surfaces, &entry->link);
+    }
+    entry->texture = texture;
+    entry->source = sampled_texture_source(texture);
+    entry->generation = watch_buffer(entry->source);
+    entry->observation = ++surface_observation;
+    entry->id = wl_resource_get_id(surface->resource);
+    wl_client_get_credentials(wl_resource_get_client(surface->resource),
+        &entry->pid, NULL, NULL);
+}
+
+static void capture_sampled_input(struct wlr_texture *texture) {
+    const char *enabled = getenv("SC7_RENDER_CAPTURE_INPUTS");
+    const char *trigger = getenv("SC7_RENDER_CAPTURE_TRIGGER");
+    const char *directory = getenv("SC7_RENDER_CAPTURE_DIR");
+    if (!enabled || strcmp(enabled, "1") != 0 || !active_scene_frame ||
+            !trigger || !directory || !texture || capture_attempts >= 8) { return; }
+    uint64_t frame = active_frame;
+    if (input_capture_frame != frame) { return; }
+    for (size_t i = 0; i < captured_input_count; ++i) {
+        if (captured_inputs[i] == texture) { return; }
+    }
+    size_t pixels = (size_t)texture->width * texture->height;
+    if (captured_input_count >= 8 || texture->width > 4096 ||
+            texture->height > 4096 || pixels > 8 * 1024 * 1024 ||
+            captured_input_pixels > 8 * 1024 * 1024 - pixels) {
+        FILE *file = trace_file();
+        if (file) {
+            fprintf(file, "%" PRIu64 " input-capture-skipped frame=%" PRIu64
+                " texture=%p reason=per-frame-limit\n", now_us(), frame, (void *)texture);
+        }
+        return;
+    }
+    struct wlr_buffer *source = sampled_texture_source(texture);
+    uint64_t generation = watch_buffer(source);
+    struct sampled_surface *identity = NULL, *candidate;
+    wl_list_for_each(candidate, &sampled_surfaces, link) {
+        if (candidate->texture == texture && candidate->source == source &&
+                candidate->generation == generation &&
+                (!identity || candidate->observation > identity->observation)) {
+            identity = candidate;
+        }
+    }
+    pid_t pid = identity ? identity->pid : 0;
+    uint32_t buffer_id = 0;
+    struct watched_buffer *watch;
+    wl_list_for_each(watch, &watched_buffers, link) {
+        if (watch->buffer == source && watch->generation == generation) {
+            if (!pid) { pid = watch->pid; }
+            break;
+        }
+    }
+    struct sc7_render_protocol_identity protocol_identity = {0};
+    if (source && sc7_render_protocol_buffer_identity(source, &protocol_identity)) {
+        buffer_id = protocol_identity.id;
+        if (!pid) { pid = protocol_identity.pid; }
+    }
+    /* Unassociated compositor textures (e.g. borders) are not client inputs. */
+    if (!pid) { return; }
+    captured_inputs[captured_input_count++] = texture;
+    captured_input_pixels += pixels;
+    char raw_path[PATH_MAX], gl_path[PATH_MAX], reason[256] = "unsupported-renderer";
+    int raw_length = snprintf(raw_path, sizeof(raw_path),
+        "%s/frame-%012" PRIu64 "-pid-%ld-surface-%u-input-%zu-raw.ppm",
+        directory, frame, (long)pid, identity ? identity->id : 0, captured_input_count);
+    int gl_length = snprintf(gl_path, sizeof(gl_path),
+        "%s/frame-%012" PRIu64 "-pid-%ld-surface-%u-input-%zu-gles.ppm",
+        directory, frame, (long)pid, identity ? identity->id : 0, captured_input_count);
+    if (raw_length <= 0 || (size_t)raw_length >= sizeof(raw_path) ||
+            gl_length <= 0 || (size_t)gl_length >= sizeof(gl_path)) { return; }
+    /* A texture's own original buffer is authoritative. A copied SHM upload
+     * has no live source here; cached client->source is not an exact snapshot. */
+    bool raw_ok = source && sc7_render_raw_snapshot(source, raw_path);
+    char raw_reason[256];
+    snprintf(raw_reason, sizeof(raw_reason), "%s", source
+        ? sc7_render_raw_snapshot_reason() : "texture-owned-upload-no-live-source");
+    int gl_status = sc7_render_capture_input_gles2(active_renderer, texture,
+        gl_path, reason, sizeof(reason));
+    struct wlr_dmabuf_attributes dma = {0};
+    struct wlr_shm_attributes shm = {0};
+    const char *kind = source ? "other" : "owned-upload";
+    uint32_t format = 0;
+    if (source && wlr_buffer_get_dmabuf(source, &dma)) {
+        kind = "dmabuf"; format = dma.format;
+    } else if (source && wlr_buffer_get_shm(source, &shm)) {
+        kind = "shm"; format = shm.format;
+    }
+    struct wlr_gles2_texture *gles = wlr_texture_is_gles2(texture) ? (void *)texture : NULL;
+    FILE *file = trace_file();
+    if (file) {
+        fprintf(file, "%" PRIu64 " input-capture frame=%" PRIu64
+            " pid=%ld surface=%p surface_id=%u wl_buffer=%u wl_buffer_generation=%" PRIu64
+            " owner_source=%p source=%p generation=%" PRIu64
+            " kind=%s size=%ux%u format=0x%08" PRIx32 " modifier=0x%016" PRIx64
+            " planes=%d stride0=%u offset0=%u texture=%p gl_texture=%u egl_image=%p"
+            " association=%s raw_ok=%d raw_reason=%s raw_path=%s"
+            " gles_status=%d gles_reason=%s gles_path=%s\n",
+            now_us(), frame, (long)pid, identity ? (void *)identity->surface : NULL,
+            identity ? identity->id : 0, buffer_id, protocol_identity.generation,
+            (void *)protocol_identity.source, (void *)source, generation,
+            kind, texture->width, texture->height, format, dma.modifier, dma.n_planes,
+            dma.stride[0], dma.offset[0], (void *)texture, gles ? gles->tex : 0,
+            gles ? (void *)gles->image : NULL, identity ? "surface-and-source" : "source-only",
+            raw_ok, raw_reason, raw_ok ? raw_path : "<none>", gl_status, reason,
+            gl_status == SC7_RENDER_INPUT_CAPTURE_OK ? gl_path : "<none>");
+    }
+}
+
 struct wlr_texture *wlr_surface_get_texture(struct wlr_surface *surface) {
     static struct wlr_texture *(*next)(struct wlr_surface *);
     if (!next) {
         next = dlsym(RTLD_NEXT, "wlr_surface_get_texture");
     }
     struct wlr_texture *texture = next(surface);
+    sc7_render_protocol_watch_surface(surface);
+    observe_sampled_surface(surface, texture);
     struct wlr_buffer *source = surface->buffer ? surface->buffer->source : NULL;
     uint64_t generation = watch_buffer(source);
     FILE *file = trace_file();
@@ -448,6 +662,16 @@ void wlr_render_pass_add_texture(struct wlr_render_pass *pass,
             gles ? (void *)gles->image : NULL, destination.x, destination.y,
             destination.width, destination.height);
     }
+    if (pass == active_pass) {
+        if (gles && gles->buffer) {
+            const char *mode = getenv("SC7_RENDER_EXPERIMENT");
+            if (mode && strcmp(mode, "hold-input") == 0) {
+                watch_held_renderer(active_renderer);
+                sc7_render_hold_input(gles->buffer);
+            }
+        }
+        capture_sampled_input(texture);
+    }
     next(pass, options);
 }
 
@@ -464,6 +688,7 @@ struct wlr_render_pass *wlr_renderer_begin_buffer_pass(struct wlr_renderer *rend
     sc7_render_target_drop(buffer, target);
     if (pass) {
         active_pass = pass;
+        active_frame = render_frame + 1;
         active_renderer = renderer;
         active_buffer = buffer;
         active_scene_frame = false;
@@ -495,12 +720,26 @@ bool wlr_render_pass_submit(struct wlr_render_pass *pass) {
     if (pass == active_pass) {
         capture_pre_submit(++render_frame);
     }
+    bool is_active = pass == active_pass;
     bool ok = next(pass);
+    if (is_active) {
+        FILE *file = trace_file();
+        if (file) {
+            fprintf(file, "%" PRIu64 " render-submit frame=%" PRIu64 " ok=%d gpu_complete=0\n",
+                now_us(), render_frame, ok);
+        }
+        /* wlroots' GLES2 submit flushes, then frees the pass. The opt-in hold
+         * experiment completes that same current context before source unlock. */
+        if (sc7_render_held_input_count()) { finish_held_inputs(); }
+    }
     if (pass == active_pass) {
         active_pass = NULL;
+        active_frame = 0;
         active_renderer = NULL;
         active_buffer = NULL;
         active_scene_frame = false;
+        input_capture_frame = 0;
+        captured_input_count = captured_input_pixels = 0;
     }
     return ok;
 }
@@ -547,6 +786,14 @@ void wlr_damage_ring_get_buffer_damage(struct wlr_damage_ring *ring,
     /* Sway queries scene damage after starting its composed output pass.
      * wlroots' empty modeset/test passes do not query this damage ring. */
     if (active_pass) {
+        if (!active_scene_frame) {
+            const char *inputs = getenv("SC7_RENDER_CAPTURE_INPUTS");
+            const char *trigger = getenv("SC7_RENDER_CAPTURE_TRIGGER");
+            if (inputs && strcmp(inputs, "1") == 0 && trigger &&
+                    access(trigger, F_OK) == 0 && capture_attempts < 8) {
+                input_capture_frame = active_frame;
+            }
+        }
         active_scene_frame = true;
     }
     FILE *file = trace_file();

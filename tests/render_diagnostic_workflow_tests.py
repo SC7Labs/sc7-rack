@@ -59,7 +59,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
                    "import json, os, pathlib, signal, sys, time\n"
                    "if sys.argv[1:] == ['--status']: raise SystemExit(1)\n"
                    "keys = ('LD_PRELOAD', 'SC7_RACK_RENDER_TRACE_LIB', 'SC7_RENDER_TRACE', "
-                   "'SC7_RENDER_EXPERIMENT', 'SC7_RACK_FULL_REPAINT', 'WLR_RENDERER')\n"
+                   "'SC7_RENDER_EXPERIMENT', 'SC7_RENDER_CAPTURE_INPUTS', 'SC7_RACK_FULL_REPAINT', 'WLR_RENDERER')\n"
                    "pathlib.Path(os.environ['SC7_TEST_LAUNCH']).write_text(json.dumps("
                    "dict(pid=os.getpid(), environment={key: os.environ.get(key) for key in keys})))\n"
                    "if os.environ.get('SC7_TEST_WAIT'):\n"
@@ -104,12 +104,13 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertFalse((self.work / "compiled").exists())
 
     def test_runner_scopes_preload_to_launcher_variable_and_cleans_temporary_library(self):
-        result = self.run_runner("--renderer", "gles2", "--mode", "fresh-input")
+        result = self.run_runner("--renderer", "gles2", "--mode", "fresh-input", "--capture-inputs")
         self.assertEqual(result.returncode, 0, result.stderr)
         launch = json.loads((self.work / "launch.json").read_text())
         environment = launch["environment"]
         self.assertIsNone(environment["LD_PRELOAD"])
         self.assertEqual(environment["SC7_RENDER_EXPERIMENT"], "fresh-input")
+        self.assertEqual(environment["SC7_RENDER_CAPTURE_INPUTS"], "1")
         self.assertEqual(environment["SC7_RACK_FULL_REPAINT"], "0")
         self.assertEqual(environment["WLR_RENDERER"], "gles2")
         trace = Path(environment["SC7_RENDER_TRACE"])
@@ -251,6 +252,38 @@ class DiagnosticCaptureTests(unittest.TestCase):
         self.assertFalse((self.work / "ipc-calls.jsonl").exists())
         self.assertFalse((self.artifacts / "capture-now").exists())
 
+    def test_input_png_alpha_and_manifest_use_only_the_exact_composed_frame(self):
+        self.ipc_socket(self.process.pid)
+        captures = self.artifacts / "captures"
+        name = f"frame-000000000007-pid-{self.process.pid}-surface-12-input-1-gles.ppm"
+        source = captures / name
+        source.write_bytes(b"P6\n2 1\n255\n" + bytes((17, 33, 49, 64, 32, 16)))
+        Path(str(source) + ".alpha.pgm").write_bytes(b"P5\n2 1\n255\n" + bytes((0, 128)))
+        old = captures / "frame-000000000006-pid-1-surface-12-input-1-gles.ppm"
+        old.write_bytes(b"P6\n1 1\n255\n\x00\x00\x00")
+        (self.artifacts / "render-trace.log").write_text(
+            "1 input-capture frame=6 pid=1 gles_status=1\n"
+            f"2 input-capture frame=7 pid={self.process.pid} gles_status=1 raw_ok=0\n")
+        thread, errors = self.produce_after_trigger("pre-submit-000000000007.ppm",
+                                                   b"P6\n1 1\n255\n\x00\x00\x00")
+        result = self.run_capture()
+        thread.join(2)
+        self.assertEqual(errors, [])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        png = source.with_suffix(".png")
+        data = png.read_bytes()
+        self.assertEqual(struct.unpack(">IIBBBBB", data[16:29]), (2, 1, 8, 6, 0, 0, 0))
+        idat_size = struct.unpack_from(">I", data, 33)[0]
+        self.assertEqual(data[37:41], b"IDAT")
+        self.assertEqual(zlib.decompress(data[41:41 + idat_size]),
+                         b"\0" + bytes((17, 33, 49, 0, 64, 32, 16, 128)))
+        manifest = json.loads((captures / "pre-submit-000000000007-inputs.json").read_text())
+        self.assertEqual(manifest["frame"], 7)
+        self.assertEqual(manifest["input_images"], [{"file": png.name, "size": [2, 1], "alpha": True}])
+        self.assertEqual(len(manifest["input_trace"]), 1)
+        self.assertIn("frame=7", manifest["input_trace"][0])
+        self.assertFalse(old.with_suffix(".png").exists())
+
     def test_invalid_pid_is_rejected_without_creating_capture_request(self):
         (self.runtime / "sc7-rack/sc7-rack.pid").write_text("invalid\n")
         result = self.run_capture()
@@ -331,6 +364,10 @@ class TracerPreloadIsolationTests(unittest.TestCase):
                                  str(ROOT / "tests/render_damage_trace.c"),
                                  str(ROOT / "tests/render_input_experiment.c"),
                                  str(ROOT / "tests/render_output_experiment.c"),
+                                 str(ROOT / "tests/render_input_capture.c"),
+                                 str(ROOT / "tests/render_raw_snapshot.c"),
+                                 str(ROOT / "tests/render_protocol_trace.c"),
+                                 str(ROOT / "tests/render_hold_input.c"),
                                  "-o", str(cls.library), *shlex.split(flags.stdout), "-ldl"],
                                 capture_output=True, text=True)
         if result.returncode:

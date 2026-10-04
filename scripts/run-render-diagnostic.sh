@@ -4,7 +4,8 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage: scripts/run-render-diagnostic.sh [--renderer gles2|pixman]
-       [--mode observe|fresh-input|fresh-target|fresh-output]
+       [--mode observe|fresh-input|fresh-target|fresh-output|hold-input]
+       [--capture-inputs]
 
 Launch Rack with a bounded renderer trace and one-shot pre-submit capture.
 Run this from a terminal on the host desktop. Stop any running Rack first.
@@ -13,9 +14,11 @@ EOF
 
 renderer="${WLR_RENDERER:-gles2}"
 experiment=observe
+capture_inputs=0
 while (( $# )); do
     case "$1" in
         --help|-h) usage; exit 0 ;;
+        --capture-inputs) capture_inputs=1; shift ;;
         --renderer|--mode)
             if (( $# < 2 )); then usage >&2; exit 2; fi
             if [[ "$1" == --renderer ]]; then renderer="$2"; else experiment="$2"; fi
@@ -24,9 +27,9 @@ while (( $# )); do
     esac
 done
 case "$renderer" in gles2|pixman) ;; *) usage >&2; exit 2 ;; esac
-case "$experiment" in observe|fresh-input|fresh-target|fresh-output) ;; *) usage >&2; exit 2 ;; esac
-if [[ "$experiment" == fresh-target && "$renderer" != gles2 ]]; then
-    echo "Error: fresh-target requires GLES2." >&2
+case "$experiment" in observe|fresh-input|fresh-target|fresh-output|hold-input) ;; *) usage >&2; exit 2 ;; esac
+if [[ ( "$experiment" == fresh-target || "$experiment" == hold-input ) && "$renderer" != gles2 ]]; then
+    echo "Error: $experiment requires GLES2." >&2
     exit 2
 fi
 
@@ -98,6 +101,10 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC -shared -DWLR_USE_UNSTABLE \
     "${cflags[@]}" "$trace_source" \
     "$project_root/tests/render_input_experiment.c" \
     "$project_root/tests/render_output_experiment.c" \
+    "$project_root/tests/render_input_capture.c" \
+    "$project_root/tests/render_raw_snapshot.c" \
+    "$project_root/tests/render_protocol_trace.c" \
+    "$project_root/tests/render_hold_input.c" \
     -o "$trace_lib" "${libs[@]}" -ldl
 
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -119,6 +126,7 @@ export SC7_RACK_RENDER_TRACE_LIB="$trace_lib"
 export SC7_RENDER_TRACE="$trace_log"
 export SC7_RENDER_CAPTURE_DIR="$capture_dir"
 export SC7_RENDER_CAPTURE_TRIGGER="$trigger"
+export SC7_RENDER_CAPTURE_INPUTS="$capture_inputs"
 export WLR_RENDERER="$renderer"
 export SC7_RENDER_EXPERIMENT="$experiment"
 export SC7_RACK_FULL_REPAINT=0

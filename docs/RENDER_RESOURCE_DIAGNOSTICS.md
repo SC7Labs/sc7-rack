@@ -2,8 +2,8 @@
 
 ## Confirmed physical evidence
 
-Laptop2 at `268bd5236296f35af834cd823cfbd09e412849b9`, Pop!_OS 24.04,
-COSMIC Monitor 1.9.0:
+Laptop2, Pop!_OS 24.04, COSMIC Monitor 1.9.0; resource experiments completed
+at `eb5085ac40bcadbf52896b977b349d3d4689bf52`:
 
 | Nested renderer | Physical result |
 | --- | --- |
@@ -11,12 +11,17 @@ COSMIC Monitor 1.9.0:
 | GLES2, explicit modifiers disabled | Corrupt |
 | GLES2, explicit modifiers disabled, full output repaint | Corrupt |
 | Repeated ordinary GLES2 | Corrupt |
+| GLES2 fresh input texture/import | Corrupt |
+| GLES2 fresh target identity | Corrupt |
+| GLES2 fresh output storage | Corrupt |
 | Pixman | Clean |
 
-The four expected clients remain alive. This result leaves client texture
-uploads/imports, render target resources, and output sharing/synchronization
-open. It does not identify a specific defective object. Full output damage
-alone does not correct the failure.
+The four expected clients remain alive. In fresh-output frame 447 the
+pre-submit image is already corrupt, despite new output storage, age zero,
+a new EGLImage and full damage. Ordinary output reuse and host submission
+cannot explain that capture. The next test compares the existing sampled
+client texture with the final image of the same frame; see
+[input diagnostics and ownership audit](RENDER_INPUT_DIAGNOSTICS.md).
 
 ## Source audit
 
@@ -52,7 +57,7 @@ Update the existing clone on laptop2 and close Rack before each trial:
 cd ~/sc7-rack
 git pull --ff-only origin main
 ./install.sh
-./scripts/run-render-diagnostic.sh --renderer gles2 --mode observe
+./scripts/run-render-diagnostic.sh --renderer gles2 --mode observe --capture-inputs
 ```
 
 The runner prints a persistent artifact directory. Reproduce the corruption
@@ -90,7 +95,8 @@ one clean capture alone cannot prove the original path is clean.
   toward export, synchronization, host presentation, or buffer ownership.
   Repeat this result because readback may itself synchronize the failure away.
 
-Close Rack, then run each experiment separately:
+The following resource experiments have already failed physically on laptop2.
+They remain available for reproduction, but are not the next requested test:
 
 ```bash
 ./scripts/run-render-diagnostic.sh --renderer gles2 --mode fresh-input
@@ -117,7 +123,7 @@ full repaint; the physical full-repaint control has already failed.
 
 A requested experiment reports allocation/import failures rather than silently
 falling back to observation. None of these modes is a production renderer fix.
-Their physical results have not yet been reported.
+All three resource experiments reproduced laptop2's corruption.
 
 ## Trace contents and bounds
 
@@ -135,7 +141,8 @@ The trace records:
   generation when that experiment is selected.
 * Buffer observation, all-consumers-released, destruction, and client
   `wl_buffer` resource destruction. An all-consumers release is not itself
-  proof of a particular host protocol callback.
+  proof of a protocol callback. Separate `wl-buffer-release-sent` records
+  observe the actual client release event at the server marshal boundary.
 * Output acquire, swapchain pointer/slot, age, buffer generation and locks;
   render pass target/FBO/renderbuffer/EGLImage; frame and output commit
   sequence, dimensions, resize generation, damage and commit result.
@@ -192,7 +199,11 @@ capture regression verifies a populated readable frame; the existing spatial
 sentinel detector checks cross-pane leakage in nested and host screenshots.
 Physical GLES2 testing remains necessary.
 
-## Main-rig validation, 2026-10-03
+## Resource-diagnostic baseline validation, 2026-10-03
+
+These totals cover the preceding resource experiments. Current input-capture
+validation and the new 177-test total are recorded in
+[input diagnostics](RENDER_INPUT_DIAGNOSTICS.md#bounds-and-local-verification).
 
 | Check | Result |
 | --- | --- |
@@ -224,7 +235,8 @@ of real COSMIC clients under laptop2's GLES2/COSMIC session.
 The target experiment has real wlroots buffer/addon lifetime tests and a mock
 GLES2 factory, including retained host ownership, failed allocation/import,
 and repeated destruction. The main rig has no DRM render node, so its real
-GLES2 FBO/EGLImage path remains untested here. Laptop2 pre-submit comparison,
-all three resource experiments, Dashboard/CPU switching, sustained Monitor
-runtime, and the 60-second CPU comparison remain pending. The exact defective
-resource and a production renderer fix/default policy are not yet established.
+GLES2 FBO/EGLImage path remains untested here. Laptop2 has now supplied the
+pre-submit comparison and all three resource results, with corruption in each.
+The new per-input comparison and the 60-second CPU comparison remain pending.
+The exact defective resource and a production renderer fix/default policy are
+not yet established.

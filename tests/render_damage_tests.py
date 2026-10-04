@@ -156,6 +156,10 @@ def build_trace(work: Path) -> Path:
          "-I", str(ROOT / "vendor/wlroots/build/include"),
          *cflags, str(TRACE_SOURCE), str(ROOT / "tests/render_input_experiment.c"),
          str(ROOT / "tests/render_output_experiment.c"),
+         str(ROOT / "tests/render_input_capture.c"),
+         str(ROOT / "tests/render_raw_snapshot.c"),
+         str(ROOT / "tests/render_protocol_trace.c"),
+         str(ROOT / "tests/render_hold_input.c"),
          "-o", str(trace), "-ldl"])
     return trace
 
@@ -346,6 +350,9 @@ def summarize_trace(path: Path) -> dict:
             "buffer_release_events": sum(" buffer-release " in line for line in lines),
             "buffer_destroy_events": sum(" buffer-destroy " in line for line in lines),
             "pre_submit_captures": sum(" pre-submit " in line and "ok=1" in line for line in lines),
+            "input_captures": sum(" input-capture " in line for line in lines),
+            "wire_buffer_releases": sum(" wl-buffer-release-sent " in line for line in lines),
+            "hold_input_buffers": sum(" hold-input-retain " in line for line in lines),
             "fresh_input_rejected_updates": sum(" fresh-input-reject-update " in line for line in lines),
             "fresh_targets": sum(" fresh-target " in line for line in lines),
             "fresh_output_retirements": sum(" fresh-output-retire " in line for line in lines),
@@ -432,7 +439,8 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
                           SC7_RENDER_EXPERIMENT=args.experiment)
         if args.capture_presubmit:
             nested_env.update(SC7_RENDER_CAPTURE_DIR=str(capture_dir),
-                              SC7_RENDER_CAPTURE_TRIGGER=str(capture_trigger))
+                              SC7_RENDER_CAPTURE_TRIGGER=str(capture_trigger),
+                              SC7_RENDER_CAPTURE_INPUTS="1" if args.capture_inputs else "0")
         if renderer == "gles2-no-modifiers":
             nested_env["WLR_EGL_NO_MODIFIERS"] = "1"
         before = sockets(runtime)
@@ -446,10 +454,12 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
                                   stderr=subprocess.STDOUT, start_new_session=True)
         nested_socket = wait_socket(runtime, before, nested, nested_log)
         nested_ipc = wait_ipc(runtime, nested.pid, nested)
-        wait_ipc_ready(nested_ipc, nested_env, nested)
-        wait_output(nested_ipc, nested_env, nested)
         client_env = dict(nested_env)
         client_env.pop("LD_PRELOAD")
+        # Instrument only the compositor. swaymsg has no Wayland-server symbols
+        # and must not load the protocol logger along with the renderer hooks.
+        wait_ipc_ready(nested_ipc, client_env, nested)
+        wait_output(nested_ipc, client_env, nested)
         client_env.update(WAYLAND_DISPLAY=nested_socket.name,
                           SWAYSOCK=str(nested_ipc),
                           XDG_CONFIG_HOME=str(work / "config"),
@@ -526,6 +536,14 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
             for node in descendants(tree) if node.get("app_id")
         }
         captures = sorted(capture_dir.glob("pre-submit-*.ppm"))
+        if args.capture_inputs:
+            inputs = list(capture_dir.glob("frame-*-input-*-raw.ppm"))
+            if renderer == "pixman" and (not inputs or not telemetry["input_captures"]):
+                raise AssertionError("input capture did not exercise owned Pixman client buffers")
+            for path in inputs:
+                with Image.open(path) as image:
+                    if image.width < 1 or image.height < 1:
+                        raise AssertionError(f"invalid input snapshot: {path}")
         if args.capture_presubmit:
             if len(captures) != 1 or capture_trigger.exists():
                 raise AssertionError(f"expected one pre-submit frame: {captures}")
@@ -564,6 +582,7 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
             "fresh-input": "fresh_input_rejected_updates",
             "fresh-target": "fresh_targets",
             "fresh-output": "fresh_output_retirements",
+            "hold-input": "hold_input_buffers",
         }.get(args.experiment)
         if required_experiment_event and not telemetry[required_experiment_event]:
             raise AssertionError(f"requested experiment was not exercised: {telemetry}")
@@ -609,16 +628,20 @@ def main() -> None:
                         help="use Sway's full-output rerender diagnostic")
     parser.add_argument("--capture-presubmit", action="store_true",
                         help="capture one composed frame before host output commit")
+    parser.add_argument("--capture-inputs", action="store_true",
+                        help="also capture exact client textures sampled for that frame")
     parser.add_argument("--experiment", default="observe",
-                        choices=("observe", "fresh-input", "fresh-target", "fresh-output"),
+                        choices=("observe", "fresh-input", "fresh-target", "fresh-output", "hold-input"),
                         help="test one resource lifetime hypothesis (diagnostic only)")
     parser.add_argument("--grim", type=Path,
                         default=Path(shutil.which("grim") or "/nonexistent/grim"))
     parser.add_argument("--artifacts", type=Path,
                         default=Path("/tmp/sc7-render-damage-results"))
     args = parser.parse_args()
-    if args.experiment == "fresh-target" and args.renderer not in ("gles2", "gles2-no-modifiers"):
-        parser.error("fresh-target requires --renderer gles2 or gles2-no-modifiers")
+    if args.capture_inputs:
+        args.capture_presubmit = True
+    if args.experiment in ("fresh-target", "hold-input") and args.renderer not in ("gles2", "gles2-no-modifiers"):
+        parser.error(f"{args.experiment} requires --renderer gles2 or gles2-no-modifiers")
     if args.host_renderer == "auto":
         args.host_renderer = ("pixman" if args.renderer == "pixman"
                               else "gles2")

@@ -16,9 +16,13 @@ Physical testing at `268bd5236296f35af834cd823cfbd09e412849b9` also corrupted
 under GLES2 with both `WLR_EGL_NO_MODIFIERS=1` and
 `SC7_RACK_FULL_REPAINT=1`. Repeating ordinary GLES2 corrupted again; Pixman
 remained clean. Full output repaint therefore does not correct this failure.
-The next diagnostic captures the composed frame before host submission and
-tests client texture imports, output targets, and output buffer reuse one at a
-time. See [resource diagnostics](RENDER_RESOURCE_DIAGNOSTICS.md).
+All three subsequent resource experiments also corrupted at `eb5085ac`:
+fresh input imports, fresh target identity, and fresh output storage. Fresh-output
+frame 447 was corrupt before host submission with new storage, age zero and
+full damage. The next single test captures each sampled client input and the
+final composed frame. See [input diagnostics](RENDER_INPUT_DIAGNOSTICS.md) for
+the physical procedure and ownership audit, and
+[resource diagnostics](RENDER_RESOURCE_DIAGNOSTICS.md) for the earlier experiments.
 
 The wlroots 0.17.4 EGL code handles that setting in `render/egl.c`. It stops
 querying explicit format modifiers and advertises implicit and linear formats
