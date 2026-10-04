@@ -56,9 +56,13 @@ if name == "sudo":
     os.execvp(args[0], args)
 elif name == "id":
     print("1000" if args == ["-u"] else "fresh-rack-user")
+elif name == "sc7-rack-settings" and args == ["--check-gui"]:
+    sys.exit(0 if (root / "tk-installed").exists() else 1)
 elif name == "python3":
     if len(args) >= 2 and args[0] == "-c" and "import tkinter" in args[1]:
-        sys.exit(0 if (root / "tk-installed").exists() else 1)
+        # A terminal-only Python can have Tk while the desktop system Python
+        # does not. This must never satisfy the Settings dependency gate.
+        sys.exit(0 if os.environ.get("SC7_TEST_CALLER_TK") else 1)
     os.execv(os.environ["SC7_TEST_PYTHON"], [os.environ["SC7_TEST_PYTHON"], *args])
 elif name == "apt-get":
     operation = next((arg for arg in args if arg in ("update", "install")), "")
@@ -314,6 +318,19 @@ class FreshInstallTests(unittest.TestCase):
         self.assertIn("requires 1.9.0 or newer", result.stderr)
         self.assertTrue(any("cosmic-monitor" in call for call in self.commands("apt-get")
                             if "install" in call))
+
+    def test_caller_python_tk_cannot_hide_missing_desktop_dependency(self) -> None:
+        self.assert_succeeded(self.install(SC7_TEST_CALLER_TK="1"))
+        self.assertTrue(any("python3-tk" in command for command in self.commands("apt-get")))
+        probes = self.commands("sc7-rack-settings")
+        self.assertEqual(probes[:2], [["sc7-rack-settings", "--check-gui"]] * 2)
+        self.assertFalse(any("import tkinter" in argument
+                             for command in self.commands("python3") for argument in command))
+
+    def test_caller_tk_with_failed_system_tk_install_still_stops(self) -> None:
+        result = self.install(SC7_TEST_CALLER_TK="1", SC7_TEST_APT_OMIT="python3-tk")
+        self.assert_failed_before_configuration(result)
+        self.assertEqual(self.commands("bootstrap-wlroots.sh"), [])
 
     def test_missing_tk_after_apt_success_is_rejected(self) -> None:
         self.assert_failed_before_configuration(self.install(SC7_TEST_APT_OMIT="python3-tk"))

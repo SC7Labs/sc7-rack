@@ -116,13 +116,15 @@ echo "All runtime dependencies satisfied."
 
 echo ""
 echo "── Checking graphical Settings support ──"
-if ! python3 -c "import tkinter" >/dev/null 2>&1; then
+# Probe the Settings executable itself: its isolated system Python is also
+# used by desktop launchers, regardless of Conda/venv in the caller's PATH.
+if ! "$SCRIPT_DIR/bin/sc7-rack-settings" --check-gui >/dev/null 2>&1; then
     "$PACKAGE_INSTALLER" python3-tk || {
         echo "ERROR: Could not install the graphical Settings dependency." >&2
         exit 1
     }
 fi
-if ! python3 -c "import tkinter" >/dev/null 2>&1; then
+if ! "$SCRIPT_DIR/bin/sc7-rack-settings" --check-gui; then
     echo "ERROR: Python Tkinter is still unavailable; graphical Settings cannot start." >&2
     exit 1
 fi
