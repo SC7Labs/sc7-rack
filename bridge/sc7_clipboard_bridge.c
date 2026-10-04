@@ -65,6 +65,15 @@ static const char *find_matching_text_mime(const struct mime_list *l) {
     return NULL;
 }
 
+static bool is_text_mime(const char *type) {
+    if (!type) return false;
+    return strcmp(type, "text/plain;charset=utf-8") == 0 ||
+           strcmp(type, "UTF8_STRING") == 0 ||
+           strcmp(type, "text/plain") == 0 ||
+           strcmp(type, "STRING") == 0 ||
+           strcmp(type, "TEXT") == 0;
+}
+
 struct bridge_endpoint;
 
 struct pending_owner_marker {
@@ -89,6 +98,7 @@ struct offer_info {
 struct bridge_endpoint {
     const char *name;
     const char *display_name;
+    bool is_host;
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_seat *seat;
@@ -114,6 +124,13 @@ struct bridge_endpoint {
 
 static bool is_owner_marker(const char *type) {
     return strncmp(type, OWNER_MIME_PREFIX, sizeof(OWNER_MIME_PREFIX) - 1) == 0;
+}
+
+static bool endpoint_is_host(const struct bridge_endpoint *ep) {
+    if (!ep) return false;
+    if (ep->is_host) return true;
+    if (ep->name && strcasecmp(ep->name, "HOST") == 0) return true;
+    return false;
 }
 
 static int generate_owner_mime(char *out, size_t capacity) {
@@ -385,11 +402,7 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
     }
 
     // Target wants text/plain, but peer only has text/uri-list
-    if ((strcmp(mime_type, "text/plain") == 0 ||
-         strcmp(mime_type, "text/plain;charset=utf-8") == 0 ||
-         strcmp(mime_type, "UTF8_STRING") == 0 ||
-         strcmp(mime_type, "STRING") == 0 ||
-         strcmp(mime_type, "TEXT") == 0) &&
+    if (is_text_mime(mime_type) &&
         mime_list_has(&peer_offer->mimes, "text/uri-list")) {
         int p[2];
         if (pipe(p) == 0) {
@@ -410,8 +423,10 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
         }
     }
 
-    // Target wants text/uri-list, but peer only has plain text
-    if (strcmp(mime_type, "text/uri-list") == 0) {
+    // Target wants text/uri-list, but peer only has plain text.
+    // Allowed only Host -> Rack (ep is nested, not host).
+    // Rack -> host: never synthesize text/uri-list from plain text.
+    if (!endpoint_is_host(ep) && strcmp(mime_type, "text/uri-list") == 0) {
         const char *alt = find_matching_text_mime(&peer_offer->mimes);
         if (alt) {
             int p[2];
@@ -435,15 +450,17 @@ static void source_handle_send(void *data, struct zwlr_data_control_source_v1 *s
     }
 
     // Target wants some text form (e.g. text/plain), but peer has another text form (e.g. UTF8_STRING)
-    const char *alt_text = find_matching_text_mime(&peer_offer->mimes);
-    if (alt_text) {
-        zwlr_data_control_offer_v1_receive(peer_offer->offer, alt_text, fd);
-        while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
-            struct pollfd pfd = { .fd = wl_display_get_fd(ep->peer->display), .events = POLLOUT };
-            poll(&pfd, 1, 100);
+    if (is_text_mime(mime_type)) {
+        const char *alt_text = find_matching_text_mime(&peer_offer->mimes);
+        if (alt_text) {
+            zwlr_data_control_offer_v1_receive(peer_offer->offer, alt_text, fd);
+            while (wl_display_flush(ep->peer->display) == -1 && errno == EAGAIN) {
+                struct pollfd pfd = { .fd = wl_display_get_fd(ep->peer->display), .events = POLLOUT };
+                poll(&pfd, 1, 100);
+            }
+            close(fd);
+            return;
         }
-        close(fd);
-        return;
     }
 
     close(fd);
@@ -469,7 +486,9 @@ static const struct zwlr_data_control_source_v1_listener source_listener = {
     .cancelled = source_handle_cancelled,
 };
 
-static void offer_all_synthesized_mimes(struct zwlr_data_control_source_v1 *source, struct offer_info *src_offer) {
+static void offer_all_synthesized_mimes(struct bridge_endpoint *dst_ep,
+                                        struct zwlr_data_control_source_v1 *source,
+                                        struct offer_info *src_offer) {
     for (size_t i = 0; i < src_offer->mimes.count; i++) {
         // Markers identify bridge-owned selections. Never forward one from
         // an observed offer to the other display.
@@ -501,8 +520,12 @@ static void offer_all_synthesized_mimes(struct zwlr_data_control_source_v1 *sour
         if (!mime_list_has(&src_offer->mimes, "text/plain")) {
             zwlr_data_control_source_v1_offer(source, "text/plain");
         }
-        if (!mime_list_has(&src_offer->mimes, "text/uri-list")) {
-            zwlr_data_control_source_v1_offer(source, "text/uri-list");
+        // Rack -> host: never synthesize text/uri-list from plain text.
+        // Host -> Rack: retain text -> URI synthesis for file-transfer parity.
+        if (!endpoint_is_host(dst_ep)) {
+            if (!mime_list_has(&src_offer->mimes, "text/uri-list")) {
+                zwlr_data_control_source_v1_offer(source, "text/uri-list");
+            }
         }
     }
 }
@@ -544,7 +567,7 @@ static void propagate_selection(struct bridge_endpoint *src_ep, bool is_primary)
         dst_ep->our_primary_source = source;
         zwlr_data_control_source_v1_add_listener(source, &source_listener, dst_ep);
 
-        offer_all_synthesized_mimes(source, src_offer);
+        offer_all_synthesized_mimes(dst_ep, source, src_offer);
         zwlr_data_control_source_v1_offer(source, marker->mime);
 
         zwlr_data_control_device_v1_set_primary_selection(dst_ep->device, source);
@@ -567,7 +590,7 @@ static void propagate_selection(struct bridge_endpoint *src_ep, bool is_primary)
         dst_ep->our_source = source;
         zwlr_data_control_source_v1_add_listener(source, &source_listener, dst_ep);
 
-        offer_all_synthesized_mimes(source, src_offer);
+        offer_all_synthesized_mimes(dst_ep, source, src_offer);
         zwlr_data_control_source_v1_offer(source, marker->mime);
 
         zwlr_data_control_device_v1_set_selection(dst_ep->device, source);
@@ -739,9 +762,10 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_handle_global_remove,
 };
 
-static int connect_endpoint(struct bridge_endpoint *ep, const char *name, const char *display_name, bool debug) {
+static int connect_endpoint(struct bridge_endpoint *ep, const char *name, const char *display_name, bool is_host, bool debug) {
     ep->name = name;
     ep->display_name = display_name;
+    ep->is_host = is_host;
     ep->debug = debug;
 
     for (int attempt = 0; attempt < 30; attempt++) {
@@ -874,8 +898,8 @@ int main(int argc, char **argv) {
     memset(&nested, 0, sizeof(nested));
 
     // Connect both displays first
-    if (connect_endpoint(&host, "HOST", host_disp, debug) < 0) return 1;
-    if (connect_endpoint(&nested, "NESTED", nested_disp, debug) < 0) {
+    if (connect_endpoint(&host, "HOST", host_disp, true, debug) < 0) return 1;
+    if (connect_endpoint(&nested, "NESTED", nested_disp, false, debug) < 0) {
         wl_display_disconnect(host.display);
         return 1;
     }

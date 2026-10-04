@@ -38,11 +38,18 @@ static int fake_callback_add_listener(struct wl_callback *callback,
 static void fake_callback_destroy(struct wl_callback *callback);
 static int fake_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                                void *(*start_routine)(void *), void *arg);
+static void fake_offer_receive(struct zwlr_data_control_offer_v1 *offer,
+                               const char *mime_type, int32_t fd);
+
+static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
+                                  void *(*)(void *), void *) = pthread_create;
+static bool mock_thread_creation_failure = false;
 
 #define zwlr_data_control_offer_v1_get_user_data fake_offer_get_user_data
 #define zwlr_data_control_offer_v1_set_user_data fake_offer_set_user_data
 #define zwlr_data_control_offer_v1_add_listener fake_offer_add_listener
 #define zwlr_data_control_offer_v1_destroy fake_offer_destroy
+#define zwlr_data_control_offer_v1_receive fake_offer_receive
 #define zwlr_data_control_source_v1_destroy fake_source_destroy
 #define zwlr_data_control_source_v1_offer fake_source_offer
 #define zwlr_data_control_manager_v1_create_data_source fake_create_data_source
@@ -60,6 +67,7 @@ static int fake_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 #include "../bridge/sc7_clipboard_bridge.c"
 #undef main
 #undef zwlr_data_control_offer_v1_destroy
+#undef zwlr_data_control_offer_v1_receive
 #undef wl_display_flush
 #undef wl_display_prepare_read
 #undef wl_display_dispatch_pending
@@ -79,6 +87,9 @@ static int fake_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 struct fake_offer {
     struct offer_info *info;
+    char payload[4096];
+    size_t payload_len;
+    char last_requested_mime[128];
 };
 
 struct fake_callback {
@@ -97,6 +108,7 @@ static int dispatch_result;
 static size_t prepare_calls;
 static size_t dispatch_calls;
 static struct wl_callback *last_sync;
+static struct mime_list last_offered_mimes;
 
 static void init_endpoint(struct bridge_endpoint *ep) {
     (void)ep;
@@ -123,6 +135,18 @@ static void fake_offer_destroy(struct zwlr_data_control_offer_v1 *offer) {
     free(offer);
 }
 
+static void fake_offer_receive(struct zwlr_data_control_offer_v1 *offer,
+                               const char *mime_type, int32_t fd) {
+    struct fake_offer *fake = (struct fake_offer *)offer;
+    if (fake) {
+        snprintf(fake->last_requested_mime, sizeof(fake->last_requested_mime), "%s", mime_type);
+        if (fake->payload_len > 0) {
+            ssize_t w = write(fd, fake->payload, fake->payload_len);
+            (void)w;
+        }
+    }
+}
+
 static void fake_source_destroy(struct zwlr_data_control_source_v1 *source) {
     destroyed_sources++;
     free(source);
@@ -136,6 +160,7 @@ static void fake_source_offer(struct zwlr_data_control_source_v1 *source,
         marker_offer_count++;
     }
     if (strcmp(mime_type, "text/plain") == 0) text_was_offered = true;
+    mime_list_add(&last_offered_mimes, mime_type);
 }
 
 static struct zwlr_data_control_source_v1 *fake_create_data_source(
@@ -218,12 +243,15 @@ static void complete_last_sync(void) {
 
 static int fake_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                                void *(*start_routine)(void *), void *arg) {
-    (void)thread;
-    (void)attr;
-    (void)start_routine;
-    (void)arg;
-    failed_thread_creations++;
-    return EAGAIN;
+    if (mock_thread_creation_failure) {
+        (void)thread;
+        (void)attr;
+        (void)start_routine;
+        (void)arg;
+        failed_thread_creations++;
+        return EAGAIN;
+    }
+    return real_pthread_create(thread, attr, start_routine, arg);
 }
 
 static size_t count_open_fds(void) {
@@ -266,6 +294,47 @@ static struct zwlr_data_control_offer_v1 *new_owned_offer(
     struct offer_info *info = fake_offer_get_user_data(offer);
     offer_handle_offer(info, offer, marker->mime);
     return offer;
+}
+
+static struct zwlr_data_control_offer_v1 *new_offer_custom(
+        struct bridge_endpoint *ep, const char *const *mimes, size_t mime_count,
+        const char *payload) {
+    struct fake_offer *fake = calloc(1, sizeof(*fake));
+    assert(fake);
+    if (payload) {
+        size_t len = strlen(payload);
+        if (len >= sizeof(fake->payload)) len = sizeof(fake->payload) - 1;
+        memcpy(fake->payload, payload, len);
+        fake->payload_len = len;
+    }
+    struct zwlr_data_control_offer_v1 *offer =
+        (struct zwlr_data_control_offer_v1 *)fake;
+    device_handle_data_offer(ep, NULL, offer);
+    struct offer_info *info = fake_offer_get_user_data(offer);
+    assert(info && info->offer == offer);
+    for (size_t i = 0; i < mime_count; i++) {
+        offer_handle_offer(info, offer, mimes[i]);
+    }
+    return offer;
+}
+
+static void setup_test_endpoints(struct bridge_endpoint *host, struct bridge_endpoint *nested) {
+    memset(host, 0, sizeof(*host));
+    memset(nested, 0, sizeof(*nested));
+    host->name = "HOST";
+    host->is_host = true;
+    nested->name = "NESTED";
+    nested->is_host = false;
+    host->peer = nested;
+    nested->peer = host;
+    host->ready = true;
+    nested->ready = true;
+    host->manager = (struct zwlr_data_control_manager_v1 *)1;
+    nested->manager = (struct zwlr_data_control_manager_v1 *)1;
+    host->device = (struct zwlr_data_control_device_v1 *)1;
+    nested->device = (struct zwlr_data_control_device_v1 *)1;
+    host->display = (struct wl_display *)1;
+    nested->display = (struct wl_display *)1;
 }
 
 static void test_regular_offer_lifetime(void) {
@@ -534,12 +603,15 @@ static void test_marker_detected_after_mime_limit(void) {
 }
 
 static void test_marker_is_filtered_from_forwarded_mimes(void) {
+    struct bridge_endpoint dst = {0};
+    dst.name = "HOST";
+    dst.is_host = true;
     struct offer_info offer = {0};
     mime_list_add(&offer.mimes, "text/plain");
     mime_list_add(&offer.mimes, OWNER_MIME_PREFIX "copied-owner");
     marker_was_offered = false;
     text_was_offered = false;
-    offer_all_synthesized_mimes((struct zwlr_data_control_source_v1 *)1, &offer);
+    offer_all_synthesized_mimes(&dst, (struct zwlr_data_control_source_v1 *)1, &offer);
     assert(!marker_was_offered);
     assert(text_was_offered);
     mime_list_clear(&offer.mimes);
@@ -557,6 +629,10 @@ static void test_propagation_advertises_only_destination_marker(void) {
     struct bridge_endpoint dst = {0};
     init_endpoint(&src);
     init_endpoint(&dst);
+    src.name = "NESTED";
+    src.is_host = false;
+    dst.name = "HOST";
+    dst.is_host = true;
     src.peer = &dst;
     dst.peer = &src;
     dst.ready = true;
@@ -600,11 +676,16 @@ static void test_conversion_thread_failure_closes_fds(void) {
     struct bridge_endpoint nested = {0};
     init_endpoint(&host);
     init_endpoint(&nested);
+    host.name = "HOST";
+    host.is_host = true;
+    nested.name = "NESTED";
+    nested.is_host = false;
     host.peer = &nested;
     nested.peer = &host;
     nested.our_source = malloc(1);
     assert(nested.our_source);
 
+    mock_thread_creation_failure = true;
     size_t baseline = count_open_fds();
     for (int mode = 0; mode < 2; mode++) {
         struct zwlr_data_control_offer_v1 *offer = new_offer(&host, false);
@@ -626,6 +707,7 @@ static void test_conversion_thread_failure_closes_fds(void) {
         host.current_offer = NULL;
     }
     assert(failed_thread_creations == 2);
+    mock_thread_creation_failure = false;
     free(nested.our_source);
 }
 
@@ -670,6 +752,246 @@ static void test_disconnected_display_does_not_spin(void) {
     assert(dispatch_calls == 1);
 }
 
+// Regression Test 1: Rack plain absolute-path text does not gain text/uri-list on host
+static void test_rack_plain_path_does_not_gain_uri_list_on_host(void) {
+    struct bridge_endpoint host, nested;
+    setup_test_endpoints(&host, &nested);
+
+    const char *const mimes[] = {
+        "text/plain;charset=utf-8",
+        "UTF8_STRING",
+        "text/plain"
+    };
+    struct zwlr_data_control_offer_v1 *offer = new_offer_custom(
+        &nested, mimes, 3, "/home/sc7/Downloads");
+
+    mime_list_clear(&last_offered_mimes);
+    device_handle_selection(&nested, NULL, offer);
+    assert(nested.current_offer != NULL);
+    assert(host.our_source != NULL);
+
+    // Host must NOT have received text/uri-list
+    assert(!mime_list_has(&last_offered_mimes, "text/uri-list"));
+    assert(mime_list_has(&last_offered_mimes, "text/plain"));
+    assert(mime_list_has(&last_offered_mimes, "text/plain;charset=utf-8"));
+    assert(mime_list_has(&last_offered_mimes, "UTF8_STRING"));
+
+    // If a host client requests text/uri-list anyway, bridge must reject it
+    int p[2];
+    assert(pipe(p) == 0);
+    source_handle_send(&host, host.our_source, "text/uri-list", p[1]);
+    char buf[128];
+    ssize_t n = read(p[0], buf, sizeof(buf));
+    assert(n == 0); // closed with EOF, no uri synthesized
+    close(p[0]);
+
+    device_handle_selection(&nested, NULL, NULL);
+    if (last_sync) complete_last_sync();
+    mime_list_clear(&last_offered_mimes);
+}
+
+// Regression Test 2: Native-style folder path reaches host as plain text
+static void test_native_style_folder_path_reaches_host_as_plain_text(void) {
+    struct bridge_endpoint host, nested;
+    setup_test_endpoints(&host, &nested);
+
+    // Replicate exactly what native host COSMIC Files copying /home/sc7/Downloads/ exposes:
+    // text/plain;charset=utf-8, UTF8_STRING, text/plain (no text/uri-list)
+    const char *folder_path = "/home/sc7/Downloads/";
+    const char *const mimes[] = {
+        "text/plain;charset=utf-8",
+        "UTF8_STRING",
+        "text/plain"
+    };
+    struct zwlr_data_control_offer_v1 *offer = new_offer_custom(
+        &nested, mimes, 3, folder_path);
+
+    mime_list_clear(&last_offered_mimes);
+    device_handle_selection(&nested, NULL, offer);
+    assert(host.our_source != NULL);
+
+    // Host offer has plain text and NO text/uri-list
+    assert(!mime_list_has(&last_offered_mimes, "text/uri-list"));
+    assert(mime_list_has(&last_offered_mimes, "text/plain"));
+    assert(mime_list_has(&last_offered_mimes, "text/plain;charset=utf-8"));
+    assert(mime_list_has(&last_offered_mimes, "UTF8_STRING"));
+
+    // Host pastes text/plain: gets "/home/sc7/Downloads/"
+    int p[2];
+    assert(pipe(p) == 0);
+    source_handle_send(&host, host.our_source, "text/plain", p[1]);
+    char buf[256] = {0};
+    ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+    close(p[0]);
+    assert(n == (ssize_t)strlen(folder_path));
+    assert(strcmp(buf, folder_path) == 0);
+
+    // Host pastes UTF8_STRING: gets "/home/sc7/Downloads/"
+    assert(pipe(p) == 0);
+    source_handle_send(&host, host.our_source, "UTF8_STRING", p[1]);
+    memset(buf, 0, sizeof(buf));
+    n = read(p[0], buf, sizeof(buf) - 1);
+    close(p[0]);
+    assert(n == (ssize_t)strlen(folder_path));
+    assert(strcmp(buf, folder_path) == 0);
+
+    device_handle_selection(&nested, NULL, NULL);
+    if (last_sync) complete_last_sync();
+    mime_list_clear(&last_offered_mimes);
+}
+
+// Regression Test 3: Genuine URI-list offers remain URI-list
+static void test_genuine_uri_list_offers_remain_uri_list(void) {
+    struct bridge_endpoint host, nested;
+    setup_test_endpoints(&host, &nested);
+
+    const char *uri_payload = "file:///home/sc7/Downloads/\r\n";
+    const char *const mimes[] = {
+        "text/uri-list"
+    };
+    struct zwlr_data_control_offer_v1 *offer = new_offer_custom(
+        &nested, mimes, 1, uri_payload);
+
+    mime_list_clear(&last_offered_mimes);
+    device_handle_selection(&nested, NULL, offer);
+    assert(host.our_source != NULL);
+
+    // Host MUST offer text/uri-list because nested genuinely offered it
+    assert(mime_list_has(&last_offered_mimes, "text/uri-list"));
+    // Host also offers URI -> text fallback types
+    assert(mime_list_has(&last_offered_mimes, "text/plain"));
+    assert(mime_list_has(&last_offered_mimes, "text/plain;charset=utf-8"));
+    assert(mime_list_has(&last_offered_mimes, "UTF8_STRING"));
+
+    // Direct match: host pastes text/uri-list -> gets "file:///home/sc7/Downloads/\r\n"
+    int p[2];
+    assert(pipe(p) == 0);
+    source_handle_send(&host, host.our_source, "text/uri-list", p[1]);
+    char buf[256] = {0};
+    ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+    close(p[0]);
+    assert(n == (ssize_t)strlen(uri_payload));
+    assert(strcmp(buf, uri_payload) == 0);
+
+    // URI -> text fallback: host pastes text/plain -> convert worker produces "/home/sc7/Downloads/"
+    assert(pipe(p) == 0);
+    source_handle_send(&host, host.our_source, "text/plain", p[1]);
+    memset(buf, 0, sizeof(buf));
+    n = read(p[0], buf, sizeof(buf) - 1);
+    close(p[0]);
+    assert(n == (ssize_t)strlen("/home/sc7/Downloads/"));
+    assert(strcmp(buf, "/home/sc7/Downloads/") == 0);
+
+    device_handle_selection(&nested, NULL, NULL);
+    if (last_sync) complete_last_sync();
+    mime_list_clear(&last_offered_mimes);
+}
+
+// Regression Test 4: Bidirectional Files copy/paste behavior remains intact
+static void test_bidirectional_files_copy_paste_intact(void) {
+    struct bridge_endpoint host, nested;
+    setup_test_endpoints(&host, &nested);
+
+    // Direction 1: Nested COSMIC Files -> Host COSMIC Files (genuine file copy)
+    {
+        const char *uri_payload = "file:///home/sc7/document.pdf\r\n";
+        const char *const nested_mimes[] = {
+            "x-special/gnome-copied-files",
+            "text/uri-list",
+            "text/plain"
+        };
+        struct zwlr_data_control_offer_v1 *offer = new_offer_custom(
+            &nested, nested_mimes, 3, uri_payload);
+
+        mime_list_clear(&last_offered_mimes);
+        device_handle_selection(&nested, NULL, offer);
+        assert(host.our_source != NULL);
+
+        // Host received both genuine file transfer types
+        assert(mime_list_has(&last_offered_mimes, "text/uri-list"));
+        assert(mime_list_has(&last_offered_mimes, "x-special/gnome-copied-files"));
+        assert(mime_list_has(&last_offered_mimes, "text/plain"));
+
+        // Host receives text/uri-list
+        int p[2];
+        assert(pipe(p) == 0);
+        source_handle_send(&host, host.our_source, "text/uri-list", p[1]);
+        char buf[256] = {0};
+        ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+        close(p[0]);
+        assert(n == (ssize_t)strlen(uri_payload));
+        assert(strcmp(buf, uri_payload) == 0);
+
+        device_handle_selection(&nested, NULL, NULL);
+        if (last_sync) complete_last_sync();
+        mime_list_clear(&last_offered_mimes);
+    }
+
+    // Direction 2: Host COSMIC Files -> Nested COSMIC Files (genuine file copy)
+    {
+        const char *uri_payload = "file:///home/sc7/host_doc.pdf\r\n";
+        const char *const host_mimes[] = {
+            "x-special/gnome-copied-files",
+            "text/uri-list",
+            "text/plain"
+        };
+        struct zwlr_data_control_offer_v1 *offer = new_offer_custom(
+            &host, host_mimes, 3, uri_payload);
+
+        mime_list_clear(&last_offered_mimes);
+        device_handle_selection(&host, NULL, offer);
+        assert(nested.our_source != NULL);
+
+        assert(mime_list_has(&last_offered_mimes, "text/uri-list"));
+        assert(mime_list_has(&last_offered_mimes, "x-special/gnome-copied-files"));
+
+        // Nested receives text/uri-list
+        int p[2];
+        assert(pipe(p) == 0);
+        source_handle_send(&nested, nested.our_source, "text/uri-list", p[1]);
+        char buf[256] = {0};
+        ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+        close(p[0]);
+        assert(n == (ssize_t)strlen(uri_payload));
+        assert(strcmp(buf, uri_payload) == 0);
+
+        device_handle_selection(&host, NULL, NULL);
+        if (last_sync) complete_last_sync();
+        mime_list_clear(&last_offered_mimes);
+    }
+
+    // Direction 3: Host plain text path -> Nested COSMIC Files (Host -> Rack text->URI synthesis retained)
+    {
+        const char *path_payload = "/home/sc7/plain_file.txt";
+        const char *const host_text_mimes[] = {
+            "text/plain"
+        };
+        struct zwlr_data_control_offer_v1 *offer = new_offer_custom(
+            &host, host_text_mimes, 1, path_payload);
+
+        mime_list_clear(&last_offered_mimes);
+        device_handle_selection(&host, NULL, offer);
+        assert(nested.our_source != NULL);
+
+        // Nested receives synthesized text/uri-list
+        assert(mime_list_has(&last_offered_mimes, "text/uri-list"));
+
+        // Nested requests text/uri-list: convert worker produces file:// URI
+        int p[2];
+        assert(pipe(p) == 0);
+        source_handle_send(&nested, nested.our_source, "text/uri-list", p[1]);
+        char buf[256] = {0};
+        ssize_t n = read(p[0], buf, sizeof(buf) - 1);
+        close(p[0]);
+        assert(n > 0);
+        assert(strcmp(buf, "file:///home/sc7/plain_file.txt\r\n") == 0);
+
+        device_handle_selection(&host, NULL, NULL);
+        if (last_sync) complete_last_sync();
+        mime_list_clear(&last_offered_mimes);
+    }
+}
+
 int main(void) {
     test_regular_offer_lifetime();
     test_primary_offer_lifetime();
@@ -685,7 +1007,15 @@ int main(void) {
     test_conversion_thread_failure_closes_fds();
     test_private_marker_send_has_no_payload();
     test_disconnected_display_does_not_spin();
-    assert(destroyed_offers == 4029);
-    puts("clipboard bridge: 4029 offers reclaimed across 2000 ownership cycles");
+
+    // Regression tests proving host-vs-Rack MIME fixes:
+    test_rack_plain_path_does_not_gain_uri_list_on_host();
+    test_native_style_folder_path_reaches_host_as_plain_text();
+    test_genuine_uri_list_offers_remain_uri_list();
+    test_bidirectional_files_copy_paste_intact();
+
+    mime_list_clear(&last_offered_mimes);
+    assert(destroyed_offers == 4035);
+    puts("clipboard bridge: 4035 offers reclaimed across 2000 ownership cycles (all regression tests passed)");
     return 0;
 }

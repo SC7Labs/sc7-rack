@@ -354,10 +354,19 @@ CP5_PID=$!
 sleep 0.3
 TYPES="$(WAYLAND_DISPLAY="$HOST_DISP" wl-paste --list-types 2>/dev/null || true)"
 kill "$CP5_PID" 2>/dev/null || true
-if echo "$TYPES" | grep -q "text/uri-list"; then
-    log_pass 25 "Clipboard bridge preserves rich MIME types (e.g. text/uri-list)"
+
+# Prove Rack plain folder path does not synthesize text/uri-list on host
+WAYLAND_DISPLAY="$NESTED_DISP" wl-copy -f "/home/sc7/Downloads/" >/dev/null 2>&1 &
+CP5B_PID=$!
+sleep 0.3
+TYPES_PLAIN="$(WAYLAND_DISPLAY="$HOST_DISP" wl-paste --list-types 2>/dev/null || true)"
+PASTE_PLAIN="$(WAYLAND_DISPLAY="$HOST_DISP" wl-paste -n 2>/dev/null || true)"
+kill "$CP5B_PID" 2>/dev/null || true
+
+if echo "$TYPES" | grep -q "text/uri-list" && ! echo "$TYPES_PLAIN" | grep -q "text/uri-list" && [[ "$PASTE_PLAIN" == "/home/sc7/Downloads/" ]]; then
+    log_pass 25 "Clipboard bridge preserves rich MIME types without synthesizing text/uri-list on host"
 else
-    log_fail 25 "MIME types not preserved"
+    log_fail 25 "MIME preservation or plain text isolation failed"
 fi
 
 # Gate 26: No clipboard content is logged
