@@ -589,10 +589,14 @@ def exercise(renderer: str, args: argparse.Namespace, work: Path,
         }.get(args.experiment)
         if required_experiment_event and not telemetry[required_experiment_event]:
             raise AssertionError(f"requested experiment was not exercised: {telemetry}")
-        if args.experiment == "shm-input":
-            kinds = telemetry["input_buffer_kinds_by_app"].get("com.system76.CosmicMonitor", [])
+        # The authenticated Rack Sway policy applies in ordinary production,
+        # including observe mode. Output buffers above may still be DMA-BUF;
+        # every nested pane must actually submit SHM client buffers.
+        for app, kinds in telemetry["input_buffer_kinds_by_app"].items():
             if kinds != ["shm"]:
-                raise AssertionError(f"Monitor did not negotiate SHM input: {kinds}")
+                raise AssertionError(f"{app} did not negotiate SHM input: {kinds}")
+        if "com.system76.CosmicMonitor" not in telemetry["input_buffer_kinds_by_app"]:
+            raise AssertionError("missing real Monitor client input telemetry")
         if renderer == "gles2-no-modifiers" and any(
                 value not in ("0x0000000000000000", "0xffffffffffffffff")
                 for value in telemetry["modifiers"]):

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a pinned Sway 1.9 with the upstream popup lifecycle fix, using only
+# Build a pinned Sway 1.9 with authenticated Rack popup/input policy, using only
 # Rack's private wlroots library. Neither system Sway nor system wlroots change.
 set -euo pipefail
 
@@ -7,7 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$ROOT/vendor/sway"
 BUILD="$SOURCE/build"
 SWAY="$BUILD/sway/sway"
-PATCH="$ROOT/patches/sway-popup-lifecycle.patch"
+PATCH="$ROOT/patches/sway-sc7labs-rack.patch"
+POPUP_PATCH="$ROOT/patches/sway-popup-lifecycle.patch"
+SHM_PATCH="$ROOT/patches/sway-shm-input.patch"
 BASE_FILE="$ROOT/patches/SWAY_BASE_REVISION"
 WLROOTS_BUILD="$ROOT/vendor/wlroots/build"
 WLROOTS_LIB="$WLROOTS_BUILD/libwlroots.so.12"
@@ -32,19 +34,22 @@ if [[ "$CHECK_ONLY" == true && ( "$INSTALL_DEPS" == true || "$FORCE_REBUILD" == 
     die "--check cannot be combined with build options"
 fi
 
-[[ -f "$BASE_FILE" && -f "$PATCH" ]] || die "Pinned source or popup patch is missing"
+[[ -f "$BASE_FILE" && -f "$PATCH" && -f "$POPUP_PATCH" && -f "$SHM_PATCH" ]] ||
+    die "Pinned source or Rack Sway patch is missing"
 [[ -f "$WLROOTS_LIB" && -f "$WLROOTS_STAMP" ]] ||
     die "Rack-local wlroots is missing; run ./scripts/bootstrap-wlroots.sh first"
 BASE_SHA="$(tr -d '[:space:]' < "$BASE_FILE")"
 [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || die "Invalid pinned Sway revision"
 SWAY_PATCH_ID="$(git patch-id --stable < "$PATCH" | awk '{print $1}')"
+POPUP_PATCH_ID="$(git patch-id --stable < "$POPUP_PATCH" | awk '{print $1}')"
 # The first VM bootstrap committed the popup handlers but left the protocol
 # version change unstaged. Identify that precise intermediate source state from
-# the tracked full patch so it can be completed without accepting other edits.
-PARTIAL_PATCH_ID="$(awk '/^diff --git a\/sway\/server\.c b\/sway\/server\.c$/ { exit } { print }' "$PATCH" |
+# the tracked historical popup patch so it can be completed without accepting other edits.
+PARTIAL_PATCH_ID="$(awk '/^diff --git a\/sway\/server\.c b\/sway\/server\.c$/ { exit } { print }' "$POPUP_PATCH" |
     git patch-id --stable | awk '{print $1}')"
 WLROOTS_PATCH_ID="$(git patch-id --stable < "$ROOT/patches/wlroots-sc7labs-rack.patch" | awk '{print $1}')"
-[[ "$SWAY_PATCH_ID" =~ ^[0-9a-f]{40}$ && "$PARTIAL_PATCH_ID" =~ ^[0-9a-f]{40}$ &&
+[[ "$SWAY_PATCH_ID" =~ ^[0-9a-f]{40}$ && "$POPUP_PATCH_ID" =~ ^[0-9a-f]{40}$ &&
+   "$PARTIAL_PATCH_ID" =~ ^[0-9a-f]{40}$ &&
    "$SWAY_PATCH_ID" != "$PARTIAL_PATCH_ID" && "$WLROOTS_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] ||
     die "Could not identify tracked patches"
 [[ "$(tr -d '[:space:]' < "$WLROOTS_STAMP")" == "$WLROOTS_PATCH_ID" ]] ||
@@ -59,17 +64,28 @@ prepare_expected_trees() {
     index="$temporary/index"
     GIT_INDEX_FILE="$index" git -C "$SOURCE" read-tree "$BASE_SHA" ||
         die "Could not read the pinned Sway tree"
-    awk '/^diff --git a\/sway\/server\.c b\/sway\/server\.c$/ { exit } { print }' "$PATCH" |
+    awk '/^diff --git a\/sway\/server\.c b\/sway\/server\.c$/ { exit } { print }' "$POPUP_PATCH" |
         GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached - ||
         die "Could not reconstruct the previous partial popup patch"
     EXPECTED_PARTIAL_TREE="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)" ||
         die "Could not identify the previous partial Sway tree"
     GIT_INDEX_FILE="$index" git -C "$SOURCE" read-tree "$BASE_SHA" ||
         die "Could not reset the temporary Sway index"
-    GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached "$PATCH" ||
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached "$POPUP_PATCH" ||
         die "Could not reconstruct the tracked popup patch"
+    EXPECTED_POPUP_TREE="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)" ||
+        die "Could not identify the previous complete popup tree"
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached "$SHM_PATCH" ||
+        die "Could not reconstruct the incremental SHM policy"
+    local incremental_tree
+    incremental_tree="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)"
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" read-tree "$BASE_SHA"
+    GIT_INDEX_FILE="$index" git -C "$SOURCE" apply --cached "$PATCH" ||
+        die "Could not reconstruct the complete Rack Sway patch"
     EXPECTED_FULL_TREE="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)" ||
         die "Could not identify the expected Sway tree"
+    [[ "$incremental_tree" == "$EXPECTED_FULL_TREE" ]] ||
+        die "Incremental SHM policy does not match the complete Rack Sway patch"
     rm -f -- "$index"
     rmdir -- "$temporary"
 }
@@ -100,9 +116,9 @@ recover_partial_popup_patch() {
 
     info "Completing the interrupted authenticated popup patch..."
     git -C "$SOURCE" add -- sway/server.c
-    [[ "$(staged_patch_id)" == "$SWAY_PATCH_ID" ]] ||
+    [[ "$(staged_patch_id)" == "$POPUP_PATCH_ID" ]] ||
         die "Recovered popup patch does not match the tracked patch"
-    [[ "$(git -C "$SOURCE" write-tree)" == "$EXPECTED_FULL_TREE" ]] ||
+    [[ "$(git -C "$SOURCE" write-tree)" == "$EXPECTED_POPUP_TREE" ]] ||
         die "Recovered popup tree does not match the tracked patch"
     git -C "$SOURCE" diff --quiet ||
         die "Recovered popup patch left unstaged tracked changes"
@@ -125,10 +141,14 @@ verify_source() {
         return
     fi
     actual_id="$(git -C "$SOURCE" diff --binary "$BASE_SHA" HEAD | git patch-id --stable | awk '{print $1}')"
-    [[ "$actual_id" == "$SWAY_PATCH_ID" &&
-       "$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')" == "$EXPECTED_FULL_TREE" ]] ||
-        die "Sway source does not match the tracked popup patch"
-    SOURCE_PATCH_ID="$actual_id"
+    local actual_tree
+    actual_tree="$(git -C "$SOURCE" rev-parse 'HEAD^{tree}')"
+    if [[ "$actual_id" == "$SWAY_PATCH_ID" && "$actual_tree" == "$EXPECTED_FULL_TREE" ]] ||
+       [[ "$actual_id" == "$POPUP_PATCH_ID" && "$actual_tree" == "$EXPECTED_POPUP_TREE" ]]; then
+        SOURCE_PATCH_ID="$actual_id"
+    else
+        die "Sway source does not match the tracked Rack patch"
+    fi
 }
 
 verify_binary() {
@@ -146,7 +166,7 @@ if [[ "$CHECK_ONLY" == true ]]; then
     verify_source
     [[ "$SOURCE_PATCH_ID" == "$SWAY_PATCH_ID" ]] && verify_binary ||
         die "Rack-local Sway source or build is missing or stale"
-    info "Verified pinned Sway, popup patch, and Rack-local wlroots linkage."
+    info "Verified pinned Sway, popup/SHM policy, and Rack-local wlroots linkage."
     exit 0
 fi
 
@@ -163,22 +183,28 @@ fi
 prepare_expected_trees
 recover_partial_popup_patch
 verify_source
-if [[ -z "$SOURCE_PATCH_ID" ]]; then
-    git -C "$SOURCE" apply --check "$PATCH" || die "Popup patch does not apply"
-    git -C "$SOURCE" apply "$PATCH"
+if [[ "$SOURCE_PATCH_ID" != "$SWAY_PATCH_ID" ]]; then
+    if [[ "$SOURCE_PATCH_ID" == "$POPUP_PATCH_ID" ]]; then
+        info "Adding authenticated SHM input policy to the previous clean Rack Sway..."
+        source_patch="$SHM_PATCH"
+    else
+        source_patch="$PATCH"
+    fi
+    git -C "$SOURCE" apply --check "$source_patch" || die "Rack Sway patch does not apply"
+    git -C "$SOURCE" apply "$source_patch"
     git -C "$SOURCE" add -- include/sway/tree/view.h sway/desktop/xdg_shell.c sway/server.c
     [[ "$(staged_patch_id)" == "$SWAY_PATCH_ID" ]] ||
-        die "Staged popup patch does not match the tracked patch"
+        die "Staged Rack Sway patch does not match the tracked patch"
     [[ "$(git -C "$SOURCE" write-tree)" == "$EXPECTED_FULL_TREE" ]] ||
-        die "Staged popup tree does not match the tracked patch"
+        die "Staged Rack Sway tree does not match the tracked patch"
     git -C "$SOURCE" diff --quiet ||
-        die "Popup patch left unstaged tracked changes"
+        die "Rack Sway patch left unstaged tracked changes"
     git -C "$SOURCE" -c user.name='SC7 Rack build' \
         -c user.email='build@sc7.invalid' commit --no-gpg-sign \
-        -m 'fix(xdg-shell): defer popup unconstrain until initial commit' >/dev/null ||
-        die "Could not commit local popup patch"
+        -m 'fix(rack): preserve popup lifecycle and use SHM client inputs' >/dev/null ||
+        die "Could not commit local Rack Sway patch"
     verify_source
-    [[ "$SOURCE_PATCH_ID" == "$SWAY_PATCH_ID" ]] || die "Popup patch verification failed"
+    [[ "$SOURCE_PATCH_ID" == "$SWAY_PATCH_ID" ]] || die "Rack Sway patch verification failed"
 fi
 
 if [[ "$FORCE_REBUILD" == false ]] && verify_binary; then

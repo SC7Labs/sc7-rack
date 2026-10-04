@@ -1,0 +1,32 @@
+diff --git a/sway/server.c b/sway/server.c
+--- a/sway/server.c
++++ b/sway/server.c
+@@ -104,8 +104,20 @@
+ 		global == server.input->virtual_pointer->global;
+ }
+ 
++// Rack v0.1 uses SHM for nested client inputs. Keep GLES2 rendering and the
++// output allocator unchanged; hide both client DMA-BUF factories, including
++// explicit registry binds. The remaining Sway security policy still applies.
++static bool rack_client_buffer_protocol_allowed(const struct wl_global *global) {
++	const char *interface = wl_global_get_interface(global)->name;
++	return strcmp(interface, "zwp_linux_dmabuf_v1") != 0 &&
++		strcmp(interface, "wl_drm") != 0;
++}
++
+ static bool filter_global(const struct wl_client *client,
+ 		const struct wl_global *global, void *data) {
++	if (!rack_client_buffer_protocol_allowed(global)) {
++		return false;
++	}
+ #if HAVE_XWAYLAND
+ 	struct wlr_xwayland *xwayland = server.xwayland.wlr_xwayland;
+ 	if (xwayland && global == xwayland->shell_v1->global) {
+@@ -145,6 +157,7 @@
+ 	}
+ 
+ 	wlr_renderer_init_wl_shm(server->renderer, server->wl_display);
++	sway_log(SWAY_INFO, "Rack client buffers: SHM; linux-dmabuf/wl_drm hidden; output renderer unchanged");
+ 
+ 	if (wlr_renderer_get_dmabuf_texture_formats(server->renderer) != NULL) {
+ 		wlr_drm_create(server->wl_display, server->renderer);

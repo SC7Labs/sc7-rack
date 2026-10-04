@@ -106,16 +106,28 @@ class SwayBootstrapTests(unittest.TestCase):
             "#define SWAY_XDG_SHELL_VERSION 3\n"
             "#define SWAY_LAYER_SHELL_VERSION 4\n", encoding="utf-8",
         )
-        self.full_patch = self.git("diff", "--binary").stdout
+        self.popup_patch = self.git("diff", "--binary").stdout
         self.legacy_patch = self.git(
             "diff", "--binary", "--", "include/sway/tree/view.h",
             "sway/desktop/xdg_shell.c",
         ).stdout
-        self.full_id = patch_id(self.full_patch)
+        self.popup_id = patch_id(self.popup_patch)
         self.legacy_id = patch_id(self.legacy_patch)
         (self.patches / "sway-popup-lifecycle.patch").write_text(
-            self.full_patch, encoding="utf-8",
+            self.popup_patch, encoding="utf-8",
         )
+        # Authenticate both the previous complete popup state and the new
+        # production input policy. Incremental and full patches must agree.
+        self.git("add", ".")
+        self.popup_tree = self.git("write-tree").stdout.strip()
+        self.server.write_text(self.server.read_text() +
+                               "/* Rack client inputs: SHM; output unchanged */\n")
+        shm_patch = self.git("diff", "--binary").stdout
+        (self.patches / "sway-shm-input.patch").write_text(shm_patch)
+        self.full_patch = self.git("diff", "--binary", self.base_sha).stdout
+        self.full_id = patch_id(self.full_patch)
+        (self.patches / "sway-sc7labs-rack.patch").write_text(self.full_patch)
+        self.git("restore", "--staged", ".")
         self.git("restore", ".")
 
         wlroots_patch = (
@@ -239,7 +251,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         return patch_id(diff)
 
     def commit_full_patch(self) -> str:
-        self.git("apply", str(self.patches / "sway-popup-lifecycle.patch"))
+        self.git("apply", str(self.patches / "sway-sc7labs-rack.patch"))
         self.git("add", "--", "include/sway/tree/view.h",
                  "sway/desktop/xdg_shell.c", "sway/server.c")
         self.git("commit", "-qm", "complete Rack patch")
@@ -258,6 +270,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(self.tracked_status(), "")
         self.assertEqual(self.actual_patch_id(), self.full_id)
         self.assertIn("SWAY_XDG_SHELL_VERSION 3", self.server.read_text())
+        self.assertIn("Rack client inputs: SHM; output unchanged", self.server.read_text())
         self.assertEqual(
             (self.sway / "build/.sc7-patch-id").read_text().strip(),
             f"{self.full_id} {self.wlroots_id}",
@@ -288,6 +301,59 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), expected_head)
         self.assert_verified()
+
+    def commit_previous_complete_patch(self) -> str:
+        self.git("apply", str(self.patches / "sway-popup-lifecycle.patch"))
+        self.git("add", ".")
+        self.git("commit", "-qm", "previous complete popup patch")
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def test_previous_complete_popup_build_migrates_and_reruns_cleanly(self) -> None:
+        previous_head = self.commit_previous_complete_patch()
+        build = self.sway / "build"
+        build.mkdir()
+        (build / ".sc7-patch-id").write_text(f"{self.popup_id} {self.wlroots_id}\n")
+        check = self.run_bootstrap("--check")
+        self.assertNotEqual(check.returncode, 0)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), previous_head)
+        result = self.run_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_verified()
+        self.assertIn("Adding authenticated SHM input policy", result.stdout)
+        self.assertIn("sway/server.c", self.git("show", "--format=", "--name-only", "HEAD").stdout)
+        before = self.commands()
+        self.assertEqual(self.run_bootstrap().returncode, 0)
+        self.assertEqual(self.commands(), before)
+
+    def test_previous_popup_state_with_unrelated_server_edit_is_rejected(self) -> None:
+        previous_head = self.commit_previous_complete_patch()
+        with self.server.open("a") as stream:
+            stream.write("/* genuine dirty source */\n")
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uncommitted tracked source changes", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), previous_head)
+        self.assertEqual(self.tracked_status().strip(), "M sway/server.c")
+        self.assertEqual(self.commands(), [])
+
+    def test_mismatched_incremental_policy_patch_is_rejected(self) -> None:
+        policy = self.patches / "sway-shm-input.patch"
+        policy.write_text(policy.read_text().replace("output unchanged", "tampered policy"))
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match the complete Rack Sway patch", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.base_sha)
+        self.assertEqual(self.tracked_status(), "")
+        self.assertEqual(self.commands(), [])
+
+    def test_expected_policy_as_uncommitted_mutation_is_rejected(self) -> None:
+        previous_head = self.commit_previous_complete_patch()
+        self.git("apply", str(self.patches / "sway-shm-input.patch"))
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uncommitted tracked source changes", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), previous_head)
+        self.assertEqual(self.commands(), [])
 
     def test_missing_sway_dependency_uses_package_helper_and_rechecks_prefix(self) -> None:
         marker = self.root / "missing-json-c"
@@ -406,7 +472,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertFalse((self.sway / "build/.sc7-patch-id").exists())
 
     def test_whitespace_modified_completed_commit_is_not_authenticated(self) -> None:
-        self.git("apply", str(self.patches / "sway-popup-lifecycle.patch"))
+        self.git("apply", str(self.patches / "sway-sc7labs-rack.patch"))
         self.view.write_text(
             self.view.read_text(encoding="utf-8").replace(
                 "    int surface_commit_listener;",
@@ -423,7 +489,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
 
         result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("source does not match the tracked popup patch", result.stderr)
+        self.assertIn("source does not match the tracked Rack patch", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), lookalike_head)
         self.assertFalse((self.sway / "build/.sc7-patch-id").exists())
 

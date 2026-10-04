@@ -1,3 +1,11 @@
+> Production update: physical laptop2 confirmed GLES2 + SHM clean and
+> GLES2 + DMA-BUF corrupt on the same fresh install. The private Sway now hides
+> DMA-BUF client factories in plain `rack` too. Diagnostic `shm-input` remains
+> useful to verify actual attachment kinds, but it no longer differs from the
+> candidate’s normal input policy. See [policy and physical gate](RENDERER_COMPATIBILITY.md)
+> and [source/upstream audit](DMABUF_INPUT_AUDIT.md). Historical DMA-BUF results
+> below came from earlier commits; current observe/fresh modes use SHM inputs.
+
 # Client input capture and ownership audit
 
 ## What laptop2 has established
@@ -109,8 +117,9 @@ simulated. Policy allocation/API failure terminates the diagnostic explicitly.
 The hook does not touch GLES2 initialization, DMA-BUF import implementation,
 output allocation or the nested backend's connection to host COSMIC. No buffer
 is converted after attachment. Only Rack Sway loads the preload, and its
-constructor removes it before children launch. Normal launches and host-opened
-applications load no policy hook. The runner rejects `shm-input` with Pixman.
+constructor removes it before children launch. Normal launches load no diagnostic hook; their authenticated Sway filter now
+hides the same two factories. Host-opened applications load no hook and use the
+host’s normal capabilities. The runner rejects `shm-input` with Pixman.
 
 `shm-input-policy` and `input-capability` trace records describe installation
 and protocol filtering. `wl-buffer-attach ... pid=MONITOR_PID ... kind=shm`

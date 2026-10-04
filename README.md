@@ -149,15 +149,15 @@ sc7-rack
 rack
 ```
 
-Rack currently keeps the accelerated GLES2 renderer with explicit EGL DMA-BUF
-modifiers disabled inside its nested compositor. **Corruption has still occurred
-on laptop2 with this setting active.** `WLR_RENDERER=pixman ./bin/sc7-rack`
-is the known-clean control there. Full-output repaint also failed the physical
-GLES2 test. Fresh input, target and output experiments also corrupted, with
-corruption already present before host submission. Experimental
-[input diagnostics](docs/RENDER_INPUT_DIAGNOSTICS.md) found the isolated Monitor
-GLES input already corrupt. The next diagnostic keeps GLES2 active while
-negotiating SHM client input, with actual transport verification.
+Rack’s private compositor now advertises SHM client buffers by default while
+keeping accelerated GLES2 rendering and output allocation on GPU systems.
+Plain `rack` uses this policy; no diagnostic flag is needed. Physical laptop2
+A/B testing found GLES2 + DMA-BUF inputs corrupt and GLES2 + SHM inputs clean
+on the same fresh installation. The candidate still needs the
+[fresh physical install gate](docs/RENDERER_COMPATIBILITY.md#dry-physical-install-gate).
+The exact DMA-BUF producer/import/driver defect remains unproven; see the
+[source and upstream audit](docs/DMABUF_INPUT_AUDIT.md). The separate Files
+long-session mutation blocker also remains open.
 The physical A/B evidence and resize test are recorded in
 [`docs/RENDERER_COMPATIBILITY.md`](docs/RENDERER_COMPATIBILITY.md).
 

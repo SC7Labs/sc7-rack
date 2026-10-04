@@ -8,6 +8,8 @@ Usage: scripts/run-render-diagnostic.sh [--renderer gles2|pixman]
        [--capture-inputs]
 
 Launch Rack with a bounded renderer trace and one-shot pre-submit capture.
+The installed private Sway uses SHM client inputs in every mode; observe is not
+an opt-in to DMA-BUF input. GLES2 output allocation remains accelerated.
 Run this from a terminal on the host desktop. Stop any running Rack first.
 EOF
 }

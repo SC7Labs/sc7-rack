@@ -1,3 +1,9 @@
+> Current production Sway uses SHM client inputs by default. These resource
+> experiments remain available, but observe/fresh modes no longer opt into
+> DMA-BUF inputs. The historical physical results below were collected before
+> that policy. See [DMA-BUF audit](DMABUF_INPUT_AUDIT.md) and
+> [candidate gate](RENDERER_COMPATIBILITY.md#dry-physical-install-gate).
+
 # Renderer resource diagnostics
 
 ## Confirmed physical evidence

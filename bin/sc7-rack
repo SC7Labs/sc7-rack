@@ -211,8 +211,8 @@ fi
 # Use Wayland backend for nested operation inside host compositor
 export WLR_BACKENDS=wayland
 export WLR_LIBINPUT_NO_DEVICES=1
-# Avoid explicit DMA-BUF modifiers by default. This does not eliminate the
-# nested GLES2 corruption seen on laptop2; Pixman is the known-good control.
+# Keep the existing output modifier compatibility setting. The authenticated
+# private Sway independently uses SHM client inputs while retaining GLES2.
 export WLR_EGL_NO_MODIFIERS="${WLR_EGL_NO_MODIFIERS:-1}"
 
 # Rack uses a pinned local Sway build. The explicit override is used by the
