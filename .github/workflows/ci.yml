@@ -1,0 +1,47 @@
+name: Security and offline regression checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-checks:
+    name: Bash, Python and isolated installer regressions
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate shell syntax without installing anything
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find bin bridge config scripts tests -type f -name '*.sh' -print0)
+          bash -n install.sh
+          bash -n uninstall.sh
+
+      - name: Validate Python syntax without launching COSMIC or Sway
+        run: python3 -m compileall -q scripts tests
+
+      - name: Verify pinned compositor source metadata
+        shell: bash
+        run: |
+          for file in patches/WLROOTS_BASE_REVISION patches/SWAY_BASE_REVISION; do
+            grep -Eq '^[[:xdigit:]]{40}$' "$file"
+          done
+          for patch in patches/wlroots-sc7labs-rack.patch patches/sway-sc7labs-rack.patch; do
+            test -s "$patch"
+            git apply --stat "$patch" >/dev/null
+          done
+
+      - name: Run offline bootstrap recovery regressions
+        run: python3 tests/bootstrap_rerun_tests.py
+
+      - name: Run isolated launcher regressions
+        run: python3 tests/install_launcher_tests.py
