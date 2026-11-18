@@ -87,7 +87,20 @@ class BootstrapRerunTests(unittest.TestCase):
         (self.patches / "WLROOTS_INPUT_PATCH_ID").write_text(
             input_id + "\n", encoding="utf-8"
         )
-        self.current_text = self.input_text + "SC7 cursor serial repair\n"
+        self.cursor_text = self.input_text + "SC7 cursor serial repair\n"
+        source.write_text(self.cursor_text, encoding="utf-8")
+        cursor_patch = self.git("diff", "--", "backend.txt").stdout
+        (self.patches / "wlroots-cursor.patch").write_text(
+            cursor_patch, encoding="utf-8"
+        )
+        cursor_id = subprocess.run(
+            ["git", "patch-id", "--stable"], input=cursor_patch,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()[0]
+        (self.patches / "WLROOTS_CURSOR_PATCH_ID").write_text(
+            cursor_id + "\n", encoding="utf-8"
+        )
+        self.current_text = self.cursor_text + "SC7 xwm class bound\n"
         source.write_text(self.current_text, encoding="utf-8")
         patch = self.git("diff", "--", "backend.txt").stdout
         (self.patches / "wlroots-sc7labs-rack.patch").write_text(
@@ -119,6 +132,17 @@ class BootstrapRerunTests(unittest.TestCase):
             " SC7 patched transport\n"
             " SC7 popup pointer release\n"
             "+SC7 cursor serial repair\n",
+            encoding="utf-8",
+        )
+        (self.patches / "wlroots-xwm-class-oob-fix.patch").write_text(
+            "diff --git a/backend.txt b/backend.txt\n"
+            "--- a/backend.txt\n"
+            "+++ b/backend.txt\n"
+            "@@ -1,3 +1,4 @@\n"
+            " SC7 patched transport\n"
+            " SC7 popup pointer release\n"
+            " SC7 cursor serial repair\n"
+            "+SC7 xwm class bound\n",
             encoding="utf-8",
         )
         self.git("checkout", "--", "backend.txt")
@@ -224,6 +248,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.git("apply", str(self.patches / "wlroots-previous.patch"))
         self.git("add", "backend.txt")
         self.git("commit", "-qm", "build(wlroots): apply prior SC7Labs Rack patch")
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def commit_cursor_patch(self) -> str:
+        self.git("apply", str(self.patches / "wlroots-cursor.patch"))
+        self.git("add", "backend.txt")
+        self.git("commit", "-qm", "fix(wlroots): preserve cursor serial across DnD exits")
         return self.git("rev-parse", "HEAD").stdout.strip()
 
     def commit_input_patch(self) -> str:
@@ -413,6 +443,37 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(self.commands(), before)
 
+    def test_cursor_patched_checkout_gets_the_xwm_security_fix_in_place(self) -> None:
+        # The generation installed before the CVE-2026-121604 backport upgrades without a reclone.
+        cursor_sha = self.commit_cursor_patch()
+        build = self.wlroots / "build"
+        build.mkdir()
+        (build / "build.ninja").write_text("old graph\n", encoding="utf-8")
+        (build / "libwlroots.so.12").write_text("valid-symbol full-renderer\n", encoding="utf-8")
+        (build / ".sc7-patch-id").write_text(
+            (self.patches / "WLROOTS_CURSOR_PATCH_ID").read_text(), encoding="utf-8")
+        result = self.run_bootstrap("--install-deps")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Upgrading the authentic cursor-serial SC7Labs source", result.stdout)
+        self.assertEqual((self.wlroots / "backend.txt").read_text(), self.current_text)
+        self.assertNotEqual(self.git("rev-parse", "HEAD").stdout.strip(), cursor_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertTrue(any(command.startswith("ninja ") for command in self.commands()))
+        self.assertNotEqual((build / ".sc7-patch-id").read_text(),
+                            (self.patches / "WLROOTS_CURSOR_PATCH_ID").read_text())
+
+    def test_invalid_xwm_upgrade_rolls_back_every_stage(self) -> None:
+        input_sha = self.commit_input_patch()
+        migration = self.patches / "wlroots-xwm-class-oob-fix.patch"
+        migration.write_text(migration.read_text(encoding="utf-8").replace(
+            "SC7 xwm class bound", "SC7 something else"), encoding="utf-8")
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("XWM WM_CLASS bound fix does not produce the current SC7Labs patch", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), input_sha)
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertEqual((self.wlroots / "backend.txt").read_text(), self.input_text)
+
     def test_unrelated_tracked_change_to_input_patch_is_rejected(self) -> None:
         input_sha = self.commit_input_patch()
         (self.wlroots / "backend.txt").write_text(
@@ -437,7 +498,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         )
         result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Cursor serial fix does not produce the current SC7Labs patch",
+        self.assertIn("Cursor serial fix does not produce the authenticated cursor source",
                       result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), input_sha)
         self.assertEqual(self.git("status", "--porcelain").stdout, "")
@@ -454,7 +515,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         )
         result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Cursor serial fix does not produce the current SC7Labs patch",
+        self.assertIn("Cursor serial fix does not produce the authenticated cursor source",
                       result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), legacy_sha)
         self.assertEqual(self.git("status", "--porcelain").stdout, "")
