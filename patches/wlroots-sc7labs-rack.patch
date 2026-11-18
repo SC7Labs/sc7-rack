@@ -1803,3 +1803,15 @@ index 0000000..9feb83b
 +void wlr_xwayland_surface_set_maximized(void *s, bool m) { (void)s; (void)m; }
 +void wlr_xwayland_surface_set_minimized(void *s, bool m) { (void)s; (void)m; }
 +void *wlr_xwayland_surface_try_from_wlr_surface(void *s) { (void)s; return NULL; }
+diff --git a/xwayland/xwm.c b/xwayland/xwm.c
+index 0a076e0..d75b031 100644
+--- a/xwayland/xwm.c
++++ b/xwayland/xwm.c
+@@ -527,6 +527,7 @@ static void read_surface_class(struct wlr_xwm *xwm,
+ 	if (len > 0 && instance_len < len) {
+ 		surface->instance = strndup(class, instance_len);
+ 		class += instance_len + 1;
++		len -= instance_len + 1;
+ 	} else {
+ 		surface->instance = NULL;
+ 	}

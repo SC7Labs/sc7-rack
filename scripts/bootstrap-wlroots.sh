@@ -36,6 +36,10 @@ WLROOTS_DIR="$REPO_ROOT/vendor/wlroots"
 BUILD_DIR="$WLROOTS_DIR/build"
 PATCH_FILE="$REPO_ROOT/patches/wlroots-sc7labs-rack.patch"
 INPUT_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_INPUT_PATCH_ID"
+CURSOR_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_CURSOR_PATCH_ID"
+# CVE-2026-121604 (wlroots < 0.20.2): out-of-bounds read of WM_CLASS in xwayland/xwm.c, upstream commit
+# 851cdd0089004884bd85a95ad21f04009cb5a53a backported unchanged to the pinned 0.17.4.
+XWM_MIGRATION_PATCH_FILE="$REPO_ROOT/patches/wlroots-xwm-class-oob-fix.patch"
 CURSOR_MIGRATION_PATCH_FILE="$REPO_ROOT/patches/wlroots-cursor-serial-fix.patch"
 PREVIOUS_PATCH_ID_FILE="$REPO_ROOT/patches/WLROOTS_PREVIOUS_PATCH_ID"
 POINTER_MIGRATION_PATCH_FILE="$REPO_ROOT/patches/wlroots-pointer-release-fix.patch"
@@ -110,6 +114,7 @@ verify_patched_source() {
     SOURCE_PATCH_ID="$actual_patch_id"
     [[ -n "$SOURCE_PATCH_ID" &&
        ( "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ||
+         "$SOURCE_PATCH_ID" == "$CURSOR_PATCH_ID" ||
          "$SOURCE_PATCH_ID" == "$INPUT_PATCH_ID" ||
          "$SOURCE_PATCH_ID" == "$PREVIOUS_PATCH_ID" ||
          "$SOURCE_PATCH_ID" == "$LEGACY_PATCH_ID" ) ]] \
@@ -154,8 +159,17 @@ upgrade_authenticated_source() {
           "$source_id" == "$INPUT_PATCH_ID" ]]; then
         [[ -n "$label" ]] || label="input-patched SC7Labs source"
         migration_files+=("$CURSOR_MIGRATION_PATCH_FILE")
+        target_ids+=("$CURSOR_PATCH_ID")
+        failure_messages+=("Cursor serial fix does not produce the authenticated cursor source")
+    fi
+    if [[ "$source_id" == "$LEGACY_PATCH_ID" ||
+          "$source_id" == "$PREVIOUS_PATCH_ID" ||
+          "$source_id" == "$INPUT_PATCH_ID" ||
+          "$source_id" == "$CURSOR_PATCH_ID" ]]; then
+        [[ -n "$label" ]] || label="cursor-serial SC7Labs source"
+        migration_files+=("$XWM_MIGRATION_PATCH_FILE")
         target_ids+=("$EXPECTED_PATCH_ID")
-        failure_messages+=("Cursor serial fix does not produce the current SC7Labs patch")
+        failure_messages+=("XWM WM_CLASS bound fix does not produce the current SC7Labs patch")
     fi
 
     info "Upgrading the authentic $label in place..."
@@ -170,8 +184,8 @@ upgrade_authenticated_source() {
         applied+=("${migration_files[index]}")
     done
 
-    commit_rack_patch "fix(wlroots): preserve cursor serial across DnD exits" \
-        || die "Committing wlroots cursor fix failed"
+    commit_rack_patch "fix(wlroots): SC7Labs patch upgrade (cursor serial, CVE-2026-121604 WM_CLASS bound)" \
+        || die "Committing wlroots patch upgrade failed"
     verify_patched_source
     [[ "$SOURCE_PATCH_ID" == "$EXPECTED_PATCH_ID" ]] \
         || die "Upgraded wlroots source does not match the current SC7Labs patch"
@@ -203,6 +217,8 @@ verify_library_features() {
 [[ -f "$BASE_REV_FILE" ]] || die "Missing: $BASE_REV_FILE"
 [[ -f "$PATCH_FILE" ]]    || die "Missing: $PATCH_FILE"
 [[ -f "$INPUT_PATCH_ID_FILE" ]] || die "Missing: $INPUT_PATCH_ID_FILE"
+[[ -f "$CURSOR_PATCH_ID_FILE" ]] || die "Missing: $CURSOR_PATCH_ID_FILE"
+[[ -f "$XWM_MIGRATION_PATCH_FILE" ]] || die "Missing: $XWM_MIGRATION_PATCH_FILE"
 [[ -f "$CURSOR_MIGRATION_PATCH_FILE" ]] || die "Missing: $CURSOR_MIGRATION_PATCH_FILE"
 [[ -f "$PREVIOUS_PATCH_ID_FILE" ]] || die "Missing: $PREVIOUS_PATCH_ID_FILE"
 [[ -f "$POINTER_MIGRATION_PATCH_FILE" ]] || die "Missing: $POINTER_MIGRATION_PATCH_FILE"
@@ -230,11 +246,17 @@ EXPECTED_PATCH_ID="$(git patch-id --stable < "$PATCH_FILE" | awk '{print $1}')"
 [[ -n "$EXPECTED_PATCH_ID" ]] || die "Could not identify the tracked wlroots patch"
 INPUT_PATCH_ID="$(tr -d '[:space:]' < "$INPUT_PATCH_ID_FILE")"
 [[ "$INPUT_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Input-patched wlroots patch ID is invalid"
+CURSOR_PATCH_ID="$(tr -d '[:space:]' < "$CURSOR_PATCH_ID_FILE")"
+[[ "$CURSOR_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Cursor-patched wlroots patch ID is invalid"
 PREVIOUS_PATCH_ID="$(tr -d '[:space:]' < "$PREVIOUS_PATCH_ID_FILE")"
 [[ "$PREVIOUS_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Previous wlroots patch ID is invalid"
 LEGACY_PATCH_ID="$(tr -d '[:space:]' < "$LEGACY_PATCH_ID_FILE")"
 [[ "$LEGACY_PATCH_ID" =~ ^[0-9a-f]{40}$ ]] || die "Legacy wlroots patch ID is invalid"
-[[ "$EXPECTED_PATCH_ID" != "$INPUT_PATCH_ID" &&
+[[ "$EXPECTED_PATCH_ID" != "$CURSOR_PATCH_ID" &&
+   "$CURSOR_PATCH_ID" != "$INPUT_PATCH_ID" &&
+   "$CURSOR_PATCH_ID" != "$PREVIOUS_PATCH_ID" &&
+   "$CURSOR_PATCH_ID" != "$LEGACY_PATCH_ID" &&
+   "$EXPECTED_PATCH_ID" != "$INPUT_PATCH_ID" &&
    "$EXPECTED_PATCH_ID" != "$PREVIOUS_PATCH_ID" &&
    "$EXPECTED_PATCH_ID" != "$LEGACY_PATCH_ID" &&
    "$INPUT_PATCH_ID" != "$PREVIOUS_PATCH_ID" &&
